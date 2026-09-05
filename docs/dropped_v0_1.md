@@ -85,3 +85,27 @@ and `generated-v0.1-archive/panel.rs.txt` (150,783 bytes, 4,205 lines, SHA-256
 `CA2DB281CB4835CA59B3EE00352934620363FCE68A0B99FA935E96EB6AF5C74D`).
 Their names may return only with an independent oracle and a compact shared
 numerical core.
+
+## Tree adapter migration
+
+`oldwood` now owns the single verified CART split, arena, and traversal kernel;
+`mayoi-no-mori` owns random forest, ExtraTrees, boosting, and isolation-tree
+logic. The similarly named types under `kanimiso::tree` and
+`kanimiso::histgb` are quality-contract adapters, not source-compatible copies
+of the v0.1 implementations.
+
+The retained adapters still return `Qualified<T>` through `Fit` / `Predict`,
+but these direct helper calls are intentionally breaking:
+
+| v0.1 call | v0.2 migration |
+|---|---|
+| `FittedTreeClassifier::predict_proba_row(x, row) -> Vec<f64>` | Pass a `Session`; inspect `Result<Qualified<Vec<f64>>>` before using the value. |
+| `FittedIsolationForest::{average_path_length, score_samples}(x, ...)` returning bare values | Pass a `Session`; both methods now return `Result<Qualified<_>>` and reject invalid shape/non-finite input. |
+| `IsolationForest::new(n_trees)` | Use `IsolationForest::new()` and set the public `n_trees` field, or construct the standalone `mayoi_no_mori::IsolationForest` with `IsolationForestOptions`. |
+| `RandomTreesEmbedding` | Removed; there is no active v0.2 replacement. `IsolationForest` remains an anomaly scorer, not an embedding substitute. |
+| `AdaBoostAlgorithm::SammeR` | The selector remains only to produce an explicit `InvalidParameter` failure. Use discrete `Samme`; the default changed from SAMME.R/depth 2 to SAMME/depth 1. |
+
+Histogram adapter types keep their legacy names, but their tree construction
+now delegates to the documented `mayoi-no-mori::LightGbm*` subset. They accept
+NaN as a dedicated high bin, reject infinity, and do not claim parity with
+scikit-learn HistGradientBoosting or upstream LightGBM.

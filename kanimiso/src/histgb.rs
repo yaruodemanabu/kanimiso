@@ -1,32 +1,32 @@
-//! Histogram gradient boosting (sklearn `HistGradientBoosting*`).
+//! Compatibility adapters for `mayoi-no-mori`'s histogram/Newton trees.
 //!
-//! Features are quantized to a shared bin grid. Each tree is grown from
-//! per-bin gradient / Hessian histograms (LightGBM-style), not by scanning
-//! every unique threshold. Leaf values are Newton steps
-//! \(-\sum g / (\sum h + \ell_2)\). A constant target or a single class is
-//! statistically empty and aborts.
+//! The histogram builder and Newton leaf solver live exclusively in
+//! [`mayoi_no_mori::LightGbmRegressor`] and
+//! [`mayoi_no_mori::LightGbmClassifier`].
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::traits::{Fit, Predict};
-use crate::validate::{inspect_classes, inspect_xy};
+use crate::tree::{encoded_labels, fail_mayoi, finish_decoded, finish_with_prediction_diagnostic};
+use crate::validate::inspect_xy_allow_missing_features;
+use mayoi_no_mori::{BoostingOptions, FeatureSampling, LightGbmOptions};
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result};
+use signlred::{Qualified, Result};
 
-/// Histogram gradient-boosting regressor (squared error).
+/// Histogram/Newton gradient-boosting regressor.
 #[derive(Clone, Debug)]
 pub struct HistGradientBoostingRegressor {
     /// Boosting rounds.
     pub max_iter: usize,
-    /// Shrinkage \(\nu\).
+    /// Positive shrinkage.
     pub learning_rate: f64,
-    /// Tree depth (root = 0).
+    /// Maximum depth (root is depth zero).
     pub max_depth: usize,
-    /// Quantile bins per feature.
+    /// Maximum non-missing bins per feature.
     pub max_bins: usize,
-    /// Minimum histogram count on each child.
+    /// Minimum rows in every CART leaf.
     pub min_samples_leaf: usize,
-    /// Hessian ridge at every leaf / split.
+    /// Non-negative L2 penalty on Newton leaf values.
     pub l2: f64,
 }
 
@@ -44,604 +44,319 @@ impl Default for HistGradientBoostingRegressor {
 }
 
 impl HistGradientBoostingRegressor {
-    /// Default histogram GBDT regressor.
+    /// Returns the documented defaults.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-/// Histogram gradient-boosting classifier (binary logistic or softmax).
+/// Histogram/Newton gradient-boosting classifier.
 #[derive(Clone, Debug)]
 pub struct HistGradientBoostingClassifier {
     /// Boosting rounds.
     pub max_iter: usize,
-    /// Shrinkage \(\nu\).
+    /// Positive shrinkage.
     pub learning_rate: f64,
-    /// Tree depth (root = 0).
+    /// Maximum depth (root is depth zero).
     pub max_depth: usize,
-    /// Quantile bins per feature.
+    /// Maximum non-missing bins per feature.
     pub max_bins: usize,
-    /// Minimum histogram count on each child.
+    /// Minimum rows in every CART leaf.
     pub min_samples_leaf: usize,
-    /// Hessian ridge at every leaf / split.
+    /// Non-negative L2 penalty on Newton leaf values.
     pub l2: f64,
 }
 
 impl Default for HistGradientBoostingClassifier {
     fn default() -> Self {
+        let regression = HistGradientBoostingRegressor::default();
         Self {
-            max_iter: 40,
-            learning_rate: 0.1,
-            max_depth: 3,
-            max_bins: 32,
-            min_samples_leaf: 2,
-            l2: 1e-6,
+            max_iter: regression.max_iter,
+            learning_rate: regression.learning_rate,
+            max_depth: regression.max_depth,
+            max_bins: regression.max_bins,
+            min_samples_leaf: regression.min_samples_leaf,
+            l2: regression.l2,
         }
     }
 }
 
 impl HistGradientBoostingClassifier {
-    /// Default histogram GBDT classifier.
+    /// Returns the documented defaults.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-/// Fitted histogram GBDT (regression or a single score).
+fn options(
+    max_iter: usize,
+    learning_rate: f64,
+    max_depth: usize,
+    max_bins: usize,
+    min_samples_leaf: usize,
+    l2: f64,
+) -> LightGbmOptions {
+    LightGbmOptions {
+        boosting: BoostingOptions {
+            iterations: max_iter,
+            learning_rate,
+            sample_fraction: 1.0,
+            seed: 0,
+            tree: oldwood::TreeOptions {
+                max_depth: Some(max_depth),
+                min_samples_leaf,
+                ..oldwood::TreeOptions::default()
+            },
+        },
+        max_bins,
+        feature_sampling: FeatureSampling::All,
+        l1_regularization: 0.0,
+        l2_regularization: l2,
+        min_hessian_leaf: 0.0,
+    }
+}
+
+/// Fitted histogram/Newton regressor.
 #[derive(Clone, Debug)]
 pub struct FittedHistGbr {
-    trees: Vec<HNode>,
-    /// Training intercept (mean of \(y\)).
+    inner: mayoi_no_mori::FittedLightGbmRegressor,
+    /// Training-target mean before the first stage.
     pub intercept: f64,
-    /// Shrinkage used at predict time.
+    /// Shrinkage used at prediction time.
     pub learning_rate: f64,
-    /// Shared per-feature bin upper bounds.
-    edges: Vec<Vec<f64>>,
 }
 
-/// Fitted histogram GBDT classifier.
-#[derive(Clone, Debug)]
-pub struct FittedHistGbc {
-    /// One tree sequence per class (softmax); length 1 is binary logistic.
-    trees: Vec<Vec<HNode>>,
-    /// Per-class intercepts.
-    pub intercepts: Vector,
-    /// Shrinkage.
-    pub learning_rate: f64,
-    edges: Vec<Vec<f64>>,
-    /// Sorted class labels.
-    pub classes: Vec<i64>,
-}
+impl Predict for FittedHistGbr {
+    type Output = Vector;
 
-#[derive(Clone, Debug)]
-enum HNode {
-    Leaf {
-        value: f64,
-    },
-    Split {
-        feature: usize,
-        threshold: f64,
-        left: Box<HNode>,
-        right: Box<HNode>,
-    },
-}
-
-fn quantile_edges(x: &Matrix, j: usize, max_bins: usize) -> Vec<f64> {
-    let mut v: Vec<f64> = (0..x.nrows())
-        .map(|i| x.get(i, j))
-        .filter(|z| z.is_finite())
-        .collect();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    v.dedup_by(|a, b| (*a - *b).abs() <= 1e-15);
-    if v.len() <= 1 {
-        return Vec::new();
-    }
-    let nb = max_bins.max(2).min(v.len());
-    let mut edges = Vec::with_capacity(nb.saturating_sub(1));
-    for k in 1..nb {
-        let t = k as f64 / nb as f64;
-        let idx = ((v.len() - 1) as f64 * t).round() as usize;
-        edges.push(v[idx.min(v.len() - 1)]);
-    }
-    edges.dedup_by(|a, b| (*a - *b).abs() <= 1e-15);
-    edges
-}
-
-fn bin_id(v: f64, edges: &[f64]) -> usize {
-    for (i, &e) in edges.iter().enumerate() {
-        if v <= e {
-            return i;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("predict"));
+        match self.inner.predict(x) {
+            Ok(values) => ctx.finish(Vector::from_iter(values)),
+            Err(error) => fail_mayoi(ctx, "histogram regression prediction", error),
         }
     }
-    edges.len()
-}
-
-fn predict_one(node: &HNode, x: &Matrix, i: usize) -> f64 {
-    match node {
-        HNode::Leaf { value } => *value,
-        HNode::Split {
-            feature,
-            threshold,
-            left,
-            right,
-        } => {
-            if x.get(i, *feature) <= *threshold {
-                predict_one(left, x, i)
-            } else {
-                predict_one(right, x, i)
-            }
-        }
-    }
-}
-
-fn grow(
-    x: &Matrix,
-    edges: &[Vec<f64>],
-    g: &[f64],
-    h: &[f64],
-    idx: &[usize],
-    depth: usize,
-    max_depth: usize,
-    min_leaf: usize,
-    l2: f64,
-) -> HNode {
-    let mut gs = 0.0;
-    let mut hs = 0.0;
-    for &i in idx {
-        gs += g[i];
-        hs += h[i];
-    }
-    let leaf = HNode::Leaf {
-        value: if hs.abs() <= 1e-18 {
-            0.0
-        } else {
-            -gs / (hs + l2)
-        },
-    };
-    if depth >= max_depth || idx.len() < min_leaf.saturating_mul(2) {
-        return leaf;
-    }
-    let mut best_gain = 0.0;
-    let mut best: Option<(usize, f64)> = None;
-    let parent = gs * gs / (hs + l2);
-    for j in 0..x.ncols() {
-        let ed = &edges[j];
-        if ed.is_empty() {
-            continue;
-        }
-        let nb = ed.len() + 1;
-        let mut sg = vec![0.0; nb];
-        let mut sh = vec![0.0; nb];
-        let mut sc = vec![0usize; nb];
-        for &i in idx {
-            let b = bin_id(x.get(i, j), ed).min(nb - 1);
-            sg[b] += g[i];
-            sh[b] += h[i];
-            sc[b] += 1;
-        }
-        let mut gl = 0.0;
-        let mut hl = 0.0;
-        let mut cl = 0usize;
-        for b in 0..ed.len() {
-            gl += sg[b];
-            hl += sh[b];
-            cl += sc[b];
-            let cr = idx.len().saturating_sub(cl);
-            if cl < min_leaf || cr < min_leaf {
-                continue;
-            }
-            let gr = gs - gl;
-            let hr = hs - hl;
-            let gain = gl * gl / (hl + l2) + gr * gr / (hr + l2) - parent;
-            if gain > best_gain {
-                best_gain = gain;
-                best = Some((j, ed[b]));
-            }
-        }
-    }
-    let Some((feature, threshold)) = best else {
-        return leaf;
-    };
-    let mut left = Vec::new();
-    let mut right = Vec::new();
-    for &i in idx {
-        if x.get(i, feature) <= threshold {
-            left.push(i);
-        } else {
-            right.push(i);
-        }
-    }
-    if left.is_empty() || right.is_empty() {
-        return leaf;
-    }
-    HNode::Split {
-        feature,
-        threshold,
-        left: Box::new(grow(
-            x,
-            edges,
-            g,
-            h,
-            &left,
-            depth + 1,
-            max_depth,
-            min_leaf,
-            l2,
-        )),
-        right: Box::new(grow(
-            x,
-            edges,
-            g,
-            h,
-            &right,
-            depth + 1,
-            max_depth,
-            min_leaf,
-            l2,
-        )),
-    }
-}
-
-fn build_edges(ctx: &mut FitCtx, x: &Matrix, max_bins: usize) -> Vec<Vec<f64>> {
-    let mut edges = Vec::with_capacity(x.ncols());
-    let mut n_const = 0usize;
-    for j in 0..x.ncols() {
-        let e = quantile_edges(x, j, max_bins);
-        if e.is_empty() {
-            n_const += 1;
-        }
-        edges.push(e);
-    }
-    if n_const == x.ncols() && x.ncols() > 0 {
-        ctx.push(
-            Issue::builder(IssueCode::ConstantFeature)
-                .message("every feature is constant after binning; histogram trees cannot split")
-                .meaninglessness(Meaninglessness::vacuous(
-                    "histogram GBDT",
-                    "no feature has more than one distinct finite value",
-                    "add variation or drop the estimator",
-                ))
-                .build(),
-        );
-    } else if n_const > 0 {
-        ctx.push(
-            Issue::builder(IssueCode::NearZeroVariance)
-                .severity(signlred::Severity::Advisory)
-                .message(format!(
-                    "{n_const} features have a single bin and will never split"
-                ))
-                .metric("constant_features", n_const as f64)
-                .build(),
-        );
-    }
-    if max_bins < 8 {
-        ctx.push(
-            Issue::builder(IssueCode::TruncatedSvdUsed)
-                .severity(signlred::Severity::Advisory)
-                .message(format!(
-                    "max_bins={max_bins} is a coarse quantization of the original features"
-                ))
-                .compromise(NumericalCompromise::new(
-                    "splits on the exact feature values",
-                    format!("quantile histogram with {max_bins} bins"),
-                    "histogram GBDT trades split resolution for speed",
-                    "thresholds sit on bin edges, not on every unique value",
-                ))
-                .build(),
-        );
-    }
-    edges
 }
 
 impl Fit for HistGradientBoostingRegressor {
     type Fitted = FittedHistGbr;
+
     fn fit(
         &mut self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
-    ) -> Result<Qualified<FittedHistGbr>> {
+    ) -> Result<Qualified<Self::Fitted>> {
         let mut ctx = FitCtx::with_session(session.clone());
-        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
-        if ctx.report.contains(IssueCode::ConstantTarget)
-            || ctx.report.contains(IssueCode::EmptyMatrix)
-            || ctx.report.contains(IssueCode::NonFiniteInput)
-        {
-            return ctx.finish(FittedHistGbr {
-                trees: Vec::new(),
-                intercept: y.mean(),
-                learning_rate: self.learning_rate,
-                edges: Vec::new(),
-            });
+        inspect_xy_allow_missing_features(&mut ctx.report, x, Some(y), &ctx.policy);
+        let model = mayoi_no_mori::LightGbmRegressor::new(options(
+            self.max_iter,
+            self.learning_rate,
+            self.max_depth,
+            self.max_bins,
+            self.min_samples_leaf,
+            self.l2,
+        ));
+        match model.fit(x, y.as_slice(), None) {
+            Ok(inner) => {
+                let intercept = inner.base_value();
+                finish_with_prediction_diagnostic(
+                    ctx,
+                    FittedHistGbr {
+                        inner,
+                        intercept,
+                        learning_rate: self.learning_rate,
+                    },
+                    x,
+                    y,
+                )
+            }
+            Err(error) => fail_mayoi(ctx, "histogram regression fit", error),
         }
-        let edges = build_edges(&mut ctx, x, self.max_bins);
-        let intercept = y.mean();
-        let mut pred = Vector::filled(y.len(), intercept);
-        let mut trees = Vec::new();
-        let idx: Vec<usize> = (0..x.nrows()).collect();
-        let h = vec![1.0; y.len()];
-        let mut last_sse = f64::INFINITY;
-        for it in 0..self.max_iter.max(1) {
-            let mut g = vec![0.0; y.len()];
-            let mut sse = 0.0;
-            for i in 0..y.len() {
-                let r = pred[i] - y[i];
-                g[i] = r;
-                sse += r * r;
-            }
-            ctx.session.step(it as u64, sse, None);
-            let tree = grow(
-                x,
-                &edges,
-                &g,
-                &h,
-                &idx,
-                0,
-                self.max_depth,
-                self.min_samples_leaf.max(1),
-                self.l2.max(0.0),
-            );
-            for i in 0..y.len() {
-                pred[i] += self.learning_rate * predict_one(&tree, x, i);
-            }
-            trees.push(tree);
-            if (last_sse - sse).abs() < 1e-15 * (1.0 + last_sse) && it > 0 {
-                ctx.session.converged("histogram GB SSE stalled", it as u64);
-                break;
-            }
-            last_sse = sse;
-        }
-        ctx.finish(FittedHistGbr {
-            trees,
-            intercept,
-            learning_rate: self.learning_rate,
-            edges,
-        })
     }
 }
 
-impl Predict for FittedHistGbr {
+/// Fitted histogram/Newton classifier.
+#[derive(Clone, Debug)]
+pub struct FittedHistGbc {
+    inner: mayoi_no_mori::FittedLightGbmClassifier,
+    /// Per-class log-prior values before the first stage.
+    pub intercepts: Vector,
+    /// Shrinkage used at prediction time.
+    pub learning_rate: f64,
+    /// Sorted training labels.
+    pub classes: Vec<i64>,
+}
+
+impl Predict for FittedHistGbc {
     type Output = Vector;
+
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("predict"));
-        let mut out = Vector::filled(x.nrows(), self.intercept);
-        for tree in &self.trees {
-            for i in 0..x.nrows() {
-                out[i] += self.learning_rate * predict_one(tree, x, i);
-            }
+        match self.inner.predict(x) {
+            Ok(labels) => finish_decoded(
+                ctx,
+                &labels,
+                &self.classes,
+                "histogram classification prediction",
+            ),
+            Err(error) => fail_mayoi(ctx, "histogram classification prediction", error),
         }
-        let _ = &self.edges;
-        ctx.finish(out)
     }
 }
 
 impl Fit for HistGradientBoostingClassifier {
     type Fitted = FittedHistGbc;
+
     fn fit(
         &mut self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
-    ) -> Result<Qualified<FittedHistGbc>> {
+    ) -> Result<Qualified<Self::Fitted>> {
         let mut ctx = FitCtx::with_session(session.clone());
-        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
-        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
-        let classes: Vec<i64> = counts.iter().map(|(k, _)| *k).collect();
-        if classes.len() < 2 {
-            return ctx.finish(FittedHistGbc {
-                trees: Vec::new(),
-                intercepts: Vector::zeros(classes.len().max(1)),
-                learning_rate: self.learning_rate,
-                edges: Vec::new(),
-                classes,
-            });
-        }
-        let edges = build_edges(&mut ctx, x, self.max_bins);
-        let k = classes.len();
-        let mut scores = Matrix::zeros(x.nrows(), k);
-        let mut trees = vec![Vec::new(); k];
-        let idx: Vec<usize> = (0..x.nrows()).collect();
-        let yoh: Vec<Vec<f64>> = (0..k)
-            .map(|c| {
-                y.as_slice()
-                    .iter()
-                    .map(|&v| {
-                        if v.round() as i64 == classes[c] {
-                            1.0
-                        } else {
-                            0.0
-                        }
-                    })
-                    .collect()
-            })
-            .collect();
-        for it in 0..self.max_iter.max(1) {
-            let mut loss = 0.0;
-            let mut proba = Matrix::zeros(x.nrows(), k);
-            for i in 0..x.nrows() {
-                let mut logits = vec![0.0; k];
-                let mut m = f64::NEG_INFINITY;
-                for c in 0..k {
-                    logits[c] = scores.get(i, c);
-                    if logits[c] > m {
-                        m = logits[c];
-                    }
-                }
-                let mut den = 0.0;
-                let mut ex = vec![0.0; k];
-                for c in 0..k {
-                    ex[c] = (logits[c] - m).exp();
-                    den += ex[c];
-                }
-                for c in 0..k {
-                    let p = if den > 0.0 {
-                        ex[c] / den
-                    } else {
-                        1.0 / k as f64
-                    };
-                    proba.set(i, c, p);
-                    loss -= yoh[c][i] * p.max(1e-15).ln();
-                }
-            }
-            ctx.session.step(it as u64, loss, None);
-            for c in 0..k {
-                let mut g = vec![0.0; x.nrows()];
-                let mut h = vec![0.0; x.nrows()];
-                for i in 0..x.nrows() {
-                    let p = proba.get(i, c);
-                    g[i] = p - yoh[c][i];
-                    h[i] = (p * (1.0 - p)).max(1e-8);
-                }
-                let tree = grow(
+        inspect_xy_allow_missing_features(&mut ctx.report, x, Some(y), &ctx.policy);
+        let (classes, target) = encoded_labels(&mut ctx, y);
+        let model = mayoi_no_mori::LightGbmClassifier::new(options(
+            self.max_iter,
+            self.learning_rate,
+            self.max_depth,
+            self.max_bins,
+            self.min_samples_leaf,
+            self.l2,
+        ));
+        match model.fit(x, &target, None) {
+            Ok(inner) => {
+                let intercepts = Vector::from_iter(inner.base_logits().iter().copied());
+                finish_with_prediction_diagnostic(
+                    ctx,
+                    FittedHistGbc {
+                        inner,
+                        intercepts,
+                        learning_rate: self.learning_rate,
+                        classes,
+                    },
                     x,
-                    &edges,
-                    &g,
-                    &h,
-                    &idx,
-                    0,
-                    self.max_depth,
-                    self.min_samples_leaf.max(1),
-                    self.l2.max(0.0),
-                );
-                for i in 0..x.nrows() {
-                    scores.set(
-                        i,
-                        c,
-                        scores.get(i, c) + self.learning_rate * predict_one(&tree, x, i),
-                    );
-                }
-                trees[c].push(tree);
+                    y,
+                )
             }
+            Err(error) => fail_mayoi(ctx, "histogram classification fit", error),
         }
-        if k > 2 {
-            ctx.push(
-                Issue::builder(IssueCode::Overparameterized)
-                    .severity(signlred::Severity::Advisory)
-                    .message("K-class histogram GB uses one tree per class per round (softmax residuals)")
-                    .compromise(NumericalCompromise::new(
-                        "joint softmax GBDT with a shared tree",
-                        "K independent Newton trees on softmax residuals",
-                        "a shared multi-output histogram tree is not implemented",
-                        "class scores are coupled only through the softmax residual, not through shared splits",
-                    ))
-                    .build(),
-            );
-        }
-        ctx.finish(FittedHistGbc {
-            trees,
-            intercepts: Vector::zeros(k),
-            learning_rate: self.learning_rate,
-            edges,
-            classes,
-        })
-    }
-}
-
-impl Predict for FittedHistGbc {
-    type Output = Vector;
-    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
-        let ctx = FitCtx::with_session(session.child("predict"));
-        let k = self.classes.len();
-        let mut out = Vector::zeros(x.nrows());
-        if k == 0 {
-            return ctx.finish(out);
-        }
-        for i in 0..x.nrows() {
-            let mut best = 0usize;
-            let mut best_s = f64::NEG_INFINITY;
-            for c in 0..k {
-                let mut s = if c < self.intercepts.len() {
-                    self.intercepts[c]
-                } else {
-                    0.0
-                };
-                if c < self.trees.len() {
-                    for tree in &self.trees[c] {
-                        s += self.learning_rate * predict_one(tree, x, i);
-                    }
-                }
-                if s > best_s {
-                    best_s = s;
-                    best = c;
-                }
-            }
-            out[i] = self.classes[best] as f64;
-        }
-        let _ = &self.edges;
-        ctx.finish(out)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use signlred::IssueCode;
 
     #[test]
-    fn hist_regressor_fits_line() {
-        let x = Matrix::from_fn(24, 1, |i, _| i as f64);
-        let y = Vector::from_iter((0..24).map(|i| 0.5 * i as f64));
-        let q = HistGradientBoostingRegressor {
-            max_iter: 30,
-            learning_rate: 0.2,
-            max_depth: 2,
-            max_bins: 16,
-            ..HistGradientBoostingRegressor::default()
-        }
-        .fit(&x, &y, &Session::new("hgb", "fit"))
-        .expect("hgb");
-        let pred = q
-            .value
-            .predict(&x, &Session::new("hgb", "p"))
-            .unwrap()
-            .value;
-        let mut sse = 0.0;
-        for i in 0..y.len() {
-            let e = pred[i] - y[i];
-            sse += e * e;
-        }
-        assert!(
-            sse / (y.len() as f64) < 0.6,
-            "mse={}",
-            sse / (y.len() as f64)
-        );
-    }
-
-    #[test]
-    fn hist_classifier_three_classes() {
-        let x = Matrix::from_fn(30, 2, |i, j| {
-            let g = i / 10;
-            g as f64 + 0.05 * j as f64 + 0.01 * (i % 10) as f64
+    fn histogram_adapter_fits_a_three_class_problem() {
+        let x = Matrix::from_fn(30, 2, |row, column| {
+            (row / 10) as f64 + 0.05 * column as f64 + 0.01 * (row % 10) as f64
         });
-        let y = Vector::from_iter((0..30).map(|i| (i / 10) as f64));
-        let q = HistGradientBoostingClassifier {
+        let y = Vector::from_iter((0..30).map(|row| (row / 10) as f64));
+        let fitted = HistGradientBoostingClassifier {
             max_iter: 25,
             learning_rate: 0.2,
             max_depth: 2,
             ..HistGradientBoostingClassifier::default()
         }
-        .fit(&x, &y, &Session::new("hgbc", "fit"))
-        .expect("hgbc");
-        let pred = q
-            .value
-            .predict(&x, &Session::new("hgbc", "p"))
-            .unwrap()
+        .fit(&x, &y, &Session::new("hist_adapter", "fit"))
+        .expect("fit")
+        .value;
+        let prediction = fitted
+            .predict(&x, &Session::new("hist_adapter", "predict"))
+            .expect("predict")
             .value;
-        let mut ok = 0;
-        for i in 0..30 {
-            if (pred[i] - y[i]).abs() < 0.5 {
-                ok += 1;
-            }
-        }
-        assert!(ok >= 24, "ok={ok}");
+        let correct = prediction
+            .as_slice()
+            .iter()
+            .zip(y.as_slice())
+            .filter(|(actual, expected)| (*actual - *expected).abs() < 0.5)
+            .count();
+        assert!(correct >= 24, "correct={correct}");
     }
 
     #[test]
-    fn constant_target_aborts() {
-        let x = Matrix::from_fn(8, 2, |i, j| (i + j) as f64);
+    fn constant_regression_target_preserves_the_quality_abort() {
+        let x = Matrix::from_fn(8, 2, |row, column| (row + column) as f64);
         let y = Vector::filled(8, 3.0);
-        let err = HistGradientBoostingRegressor::new()
-            .fit(&x, &y, &Session::new("hgb", "fit"))
-            .unwrap_err();
-        assert_eq!(err.primary().code, IssueCode::ConstantTarget);
+        let failure = HistGradientBoostingRegressor::new()
+            .fit(&x, &y, &Session::new("hist_constant", "fit"))
+            .expect_err("constant response must abort");
+        assert_eq!(failure.primary.code, IssueCode::ConstantTarget);
+    }
+
+    #[test]
+    fn depth_zero_histogram_tree_reports_constant_predictions() {
+        let x = Matrix::from_row_major(6, 1, &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        let y = Vector::from_iter([0.0, 0.0, 1.0, 2.0, 3.0, 3.0]);
+        let failure = HistGradientBoostingRegressor {
+            max_iter: 2,
+            max_depth: 0,
+            min_samples_leaf: 1,
+            ..HistGradientBoostingRegressor::default()
+        }
+        .fit(&x, &y, &Session::new("hist_depth_zero", "fit"))
+        .expect_err("a depth-zero ensemble must expose its constant predictions");
+        assert_eq!(failure.primary.code, IssueCode::PredictionsAreConstant);
+        assert!(failure.report.contains(IssueCode::PredictionsAreConstant));
+    }
+
+    #[test]
+    fn histogram_adapter_accepts_nan_missing_values_but_rejects_infinity() {
+        let y = Vector::from_iter([0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]);
+        let with_missing =
+            Matrix::from_row_major(8, 1, &[0.0, 0.5, 1.0, f64::NAN, 2.0, 2.5, 3.0, f64::NAN]);
+        let accepted = HistGradientBoostingRegressor {
+            max_iter: 4,
+            max_depth: 1,
+            min_samples_leaf: 1,
+            ..HistGradientBoostingRegressor::default()
+        }
+        .fit(&with_missing, &y, &Session::new("hist_missing", "fit"))
+        .expect("NaN is the supported missing-value marker");
+        assert!(!accepted.report.contains(IssueCode::NonFiniteInput));
+
+        let with_infinity =
+            Matrix::from_row_major(8, 1, &[0.0, 0.5, 1.0, f64::INFINITY, 2.0, 2.5, 3.0, 3.5]);
+        let failure = HistGradientBoostingRegressor {
+            max_iter: 4,
+            max_depth: 1,
+            min_samples_leaf: 1,
+            ..HistGradientBoostingRegressor::default()
+        }
+        .fit(&with_infinity, &y, &Session::new("hist_infinity", "fit"))
+        .expect_err("infinity is not a missing-value marker");
+        assert_eq!(failure.primary.code, IssueCode::NonFiniteInput);
+        assert!(failure.report.contains(IssueCode::NonFiniteInput));
+    }
+
+    #[test]
+    fn histogram_regression_intercept_matches_the_training_mean() {
+        let x = Matrix::from_row_major(4, 1, &[0.0, 1.0, 2.0, 3.0]);
+        let y = Vector::from_iter([0.0, 0.0, 2.0, 2.0]);
+        let fitted = HistGradientBoostingRegressor {
+            max_iter: 1,
+            learning_rate: 0.25,
+            max_depth: 1,
+            max_bins: 4,
+            min_samples_leaf: 1,
+            l2: 0.0,
+        }
+        .fit(&x, &y, &Session::new("hist_intercept", "fit"))
+        .expect("fit")
+        .value;
+        assert_eq!(fitted.intercept, 1.0);
+        assert_eq!(
+            fitted
+                .predict(&x, &Session::new("hist_intercept", "predict"))
+                .expect("predict")
+                .value,
+            Vector::from_iter([0.75, 0.75, 1.25, 1.25])
+        );
     }
 }

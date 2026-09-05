@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # 冗長性 lint（R1 / R4 / R5 / R7 / R10）+ 通常スタック + ndarray/faer 単一版。全て ratchet 予算。
 set -uo pipefail
-SRC="kanimiso/src signlred/src ojizou-san/src"
+for required in python3 grep wc find xargs awk sort cargo; do
+  command -v "$required" >/dev/null || { echo "FAIL missing prerequisite: $required" >&2; exit 1; }
+done
+SRC="kanimiso/src signlred/src ojizou-san/src tsutsumi/src number-ruler/src oldwood/src mayoi-no-mori/src Isuzu/amatsuki/src"
 ALLOW=scripts/lint_allowlist.txt        # 固有名詞の数値（Exp3, Ucb1, Catch22, X13, 2Sls, Chi2, F1, R2 …）を 1 行 1 固定文字列
 [ -f "$ALLOW" ] || : > "$ALLOW"
 
 # ---- 予算（下げるのみ。初期値 = 2026-09-01 実測）-----------------------------
 MAX_R1_NUMERAL_IDENTS=18       # 目標 0  （Garch11 のような「パラメータ値」は allowlist に入れない）
-MAX_R4_PUB_ITEMS=1430          # 目標 1000
+MAX_R4_PUB_ITEMS=1347          # 目標 1000
 MAX_R5_FILES_OVER_3000=6       # 目標 0
-MAX_R7_DENSITY_FLOORS=40       # 目標 0
+MAX_R7_DENSITY_FLOORS=36       # 目標 0
 MAX_R10_DISTINCT_FROM=8        # 目標 0
 ALLOW_RUST_MIN_STACK=0         # generated HMM monolith was archived in PR 8
 
@@ -19,7 +22,7 @@ ALLOW_RUST_MIN_STACK=0         # generated HMM monolith was archived in PR 8
 R5_FILE_LINE_BUDGETS=(
   "kanimiso/src/glm.rs:6185"
   "kanimiso/src/metrics.rs:4933"
-  "kanimiso/src/linear_model.rs:4869"
+  "kanimiso/src/linear_model.rs:4288"
   "kanimiso/src/model_selection.rs:4292"
   "kanimiso/src/decompose.rs:3918"
   "kanimiso/src/cluster.rs:3547"

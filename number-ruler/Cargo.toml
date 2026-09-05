@@ -1,0 +1,18 @@
+[package]
+name = "number-ruler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Carefully annotated linear, generalized, mixed, and additive regression models."
+readme = "README.md"
+
+[dependencies]
+tsutsumi = { workspace = true, features = ["linalg"] }
+signlred = { workspace = true }
+ojizou-san = { workspace = true }
+
+[dev-dependencies]
+serde_json = "1.0"

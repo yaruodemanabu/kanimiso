@@ -11,10 +11,14 @@ keywords = ["machine-learning", "statistics", "time-series", "online-learning", 
 categories = ["science", "algorithms", "mathematics"]
 
 [dependencies]
+tsutsumi = { workspace = true, features = ["linalg"] }
+number-ruler = { workspace = true }
 faer = { workspace = true }
 ndarray = { workspace = true }
 signlred = { workspace = true }
 ojizou-san = { workspace = true }
+oldwood = { workspace = true }
+mayoi-no-mori = { workspace = true }
 
 [dev-dependencies]
 serde_json = "1.0"

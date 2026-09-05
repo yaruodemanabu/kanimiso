@@ -1,0 +1,25 @@
+[package]
+name = "oldwood"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "A small, deterministic, verification-first CART implementation in pure Rust"
+readme = "README.md"
+keywords = ["cart", "decision-tree", "machine-learning", "statistics"]
+categories = ["algorithms", "science"]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tsutsumi = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "deny"
+pedantic = "deny"

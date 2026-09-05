@@ -74,10 +74,18 @@ pub mod vecm;
 pub use context::FitCtx;
 pub use coverage::{inventory, verified, Algorithm, CoverageStatus};
 pub use data::{Matrix, Vector};
+/// Forest and boosting crate built on [`oldwood`].
+pub use mayoi_no_mori;
 pub use ndarray;
+/// Annotated regression, mixed and additive analyses, and linear SHAP.
+pub use number_ruler;
 pub use ojizou_san as log;
+/// Verification-first CART crate used by the tree stack.
+pub use oldwood;
 pub use signlred;
 pub use traits::{Fit, FitSeries, FitUnsupervised, PartialFit, Predict, Transform};
+/// Shared independently tested numerical kernels and matrix contracts.
+pub use tsutsumi;
 
 /// Crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -17,3 +17,10 @@ OnlineR2
 RollingR2
 r2_score
 pub fn r2(
+AdaBoostR2Options
+ChaCha8Rng
+Open01
+OpenClosed01
+Exp1
+sample_chi2
+sample_noncentral_chi2
