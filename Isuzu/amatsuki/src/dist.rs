@@ -30,9 +30,15 @@ pub struct Open01;
 impl Distribution for Open01 {
     type Value = f64;
     fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> f64 {
-        // 53-bit midpoints: (k + ½) / 2^53 ∈ (0, 1). Never hits 0 or 1.
-        let k = rng.next_u64() >> 11;
-        (k as f64 + 0.5) * (1.0 / ((1u64 << 53) as f64))
+        // Conditioning the exact `[0, 1)` grid on a nonzero draw avoids both
+        // endpoints. Computing `(k + ½) / 2^53` in binary64 is not enough:
+        // the largest midpoint rounds to exactly `1.0`.
+        loop {
+            let value = rng.next_f64();
+            if value > 0.0 {
+                return value;
+            }
+        }
     }
 }
 
@@ -575,8 +581,37 @@ mod tests {
     use super::*;
     use crate::chacha::seed_rng;
 
+    #[derive(Debug)]
+    struct ScriptedRng {
+        words: Vec<u64>,
+        index: usize,
+    }
+
+    impl ScriptedRng {
+        fn new(words: Vec<u64>) -> Self {
+            Self { words, index: 0 }
+        }
+    }
+
+    impl Rng for ScriptedRng {
+        fn next_u64(&mut self) -> u64 {
+            let word = self.words[self.index];
+            self.index += 1;
+            word
+        }
+    }
+
     fn mean(xs: &[f64]) -> f64 {
         xs.iter().sum::<f64>() / xs.len() as f64
+    }
+
+    #[test]
+    fn open01_retries_zero_and_never_rounds_to_one() {
+        let mut rng = ScriptedRng::new(vec![0, u64::MAX]);
+        let value = rng.sample(Open01);
+        assert!(value > 0.0 && value < 1.0);
+        assert_eq!(rng.index, 2, "the zero endpoint must be retried");
+        assert_eq!(value, 1.0 - 1.0 / ((1u64 << 53) as f64));
     }
 
     #[test]

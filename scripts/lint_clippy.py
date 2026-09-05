@@ -11,17 +11,17 @@ import subprocess
 import sys
 
 
-# Measured with Rust 1.98.0 on 2026-09-03 after deduplicating the same source
+# Measured with Rust 1.98.0 on 2026-09-04 after deduplicating the same source
 # diagnostic emitted for both the library and its test harness. These budgets
 # may only decrease; a previously unseen lint therefore starts with budget 0.
 MAX_WARNINGS_BY_CODE = {
-    "clippy::result_large_err": 318,
-    "clippy::needless_range_loop": 125,
+    "clippy::result_large_err": 311,
+    "clippy::needless_range_loop": 116,
     "clippy::single_match": 18,
     "clippy::manual_contains": 13,
     "clippy::question_mark": 11,
-    "clippy::too_many_arguments": 10,
-    "clippy::field_reassign_with_default": 9,
+    "clippy::too_many_arguments": 3,
+    "clippy::field_reassign_with_default": 6,
     "clippy::derivable_impls": 5,
     "clippy::manual_range_contains": 3,
     "clippy::len_zero": 2,
@@ -32,9 +32,6 @@ MAX_WARNINGS_BY_CODE = {
     "clippy::excessive_precision": 1,
     "clippy::manual_clamp": 1,
     "clippy::manual_div_ceil": 1,
-    "clippy::neg_cmp_op_on_partial_ord": 1,
-    "clippy::redundant_closure": 1,
-    "clippy::should_implement_trait": 1,
     "clippy::unnecessary_lazy_evaluations": 1,
     "clippy::useless_vec": 1,
 }

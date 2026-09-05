@@ -4,16 +4,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Pure-Rust machine learning and statistics on ndarray and faer. v0.2 is reconstituted from a verified core; quality is enforced by signlred and ojizou-san. See AGENTS.md."
+description = "Verification-first Pure Rust core for time-series econometrics, online estimation, state-space models, and statistical learning."
+repository.workspace = true
 readme = "../README.md"
 keywords = ["machine-learning", "statistics", "time-series", "online-learning", "linear-algebra"]
 categories = ["science", "algorithms", "mathematics"]
 
 [dependencies]
+tsutsumi = { workspace = true, features = ["linalg"] }
+number-ruler = { workspace = true }
 faer = { workspace = true }
 ndarray = { workspace = true }
 signlred = { workspace = true }
 ojizou-san = { workspace = true }
+oldwood = { workspace = true }
+mayoi-no-mori = { workspace = true }
 
 [dev-dependencies]
 serde_json = "1.0"

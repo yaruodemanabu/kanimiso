@@ -1,7 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["signlred", "ojizou-san", "kanimiso"]
-default-members = ["signlred", "ojizou-san", "kanimiso"]
+members = ["signlred", "ojizou-san", "tsutsumi", "number-ruler", "oldwood", "mayoi-no-mori", "kanimiso"]
+default-members = ["signlred", "ojizou-san", "tsutsumi", "number-ruler", "oldwood", "mayoi-no-mori", "kanimiso"]
+exclude = ["Isuzu/amatsuki"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,7 +13,12 @@ authors = ["kanimiso contributors"]
 repository = "https://github.com/yaruodemanabu/kanimiso"
 
 [workspace.dependencies]
+tsutsumi = { path = "tsutsumi", version = "0.1.0", default-features = false }
+number-ruler = { path = "number-ruler", version = "0.1.0" }
 faer = { version = "=0.24.4", default-features = false, features = ["std", "linalg", "rayon"] }
 ndarray = { version = "=0.17.2", default-features = false, features = ["std"] }
 signlred = { path = "signlred", version = "0.1.0" }
 ojizou-san = { path = "ojizou-san", version = "0.1.0" }
+oldwood = { path = "oldwood", version = "0.1.0" }
+mayoi-no-mori = { path = "mayoi-no-mori", version = "0.1.0" }
+amatsuki = { path = "Isuzu/amatsuki", version = "0.1.0", default-features = false }

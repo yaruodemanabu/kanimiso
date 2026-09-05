@@ -1,17 +1,32 @@
 #!/usr/bin/env bash
 # 冗長性 lint（R1 / R4 / R5 / R7 / R10）+ 通常スタック + ndarray/faer 単一版。全て ratchet 予算。
 set -uo pipefail
-SRC="kanimiso/src signlred/src ojizou-san/src"
+for required in python3 grep wc find xargs awk sort cargo; do
+  command -v "$required" >/dev/null || { echo "FAIL missing prerequisite: $required" >&2; exit 1; }
+done
+SRC="kanimiso/src signlred/src ojizou-san/src tsutsumi/src number-ruler/src oldwood/src mayoi-no-mori/src Isuzu/amatsuki/src"
 ALLOW=scripts/lint_allowlist.txt        # 固有名詞の数値（Exp3, Ucb1, Catch22, X13, 2Sls, Chi2, F1, R2 …）を 1 行 1 固定文字列
 [ -f "$ALLOW" ] || : > "$ALLOW"
 
 # ---- 予算（下げるのみ。初期値 = 2026-09-01 実測）-----------------------------
 MAX_R1_NUMERAL_IDENTS=18       # 目標 0  （Garch11 のような「パラメータ値」は allowlist に入れない）
-MAX_R4_PUB_ITEMS=1430          # 目標 1000
+MAX_R4_PUB_ITEMS=1347          # 目標 1000
 MAX_R5_FILES_OVER_3000=6       # 目標 0
-MAX_R7_DENSITY_FLOORS=40       # 目標 0
+MAX_R7_DENSITY_FLOORS=36       # 目標 0
 MAX_R10_DISTINCT_FROM=8        # 目標 0
 ALLOW_RUST_MIN_STACK=0         # generated HMM monolith was archived in PR 8
+
+# R5 per-file ratchets close the loophole where an already-oversized file can
+# grow without changing MAX_R5_FILES_OVER_3000. Lower a value whenever its file
+# shrinks; remove the entry after the file reaches 3,000 lines.
+R5_FILE_LINE_BUDGETS=(
+  "kanimiso/src/glm.rs:6185"
+  "kanimiso/src/metrics.rs:4933"
+  "kanimiso/src/linear_model.rs:4288"
+  "kanimiso/src/model_selection.rs:4292"
+  "kanimiso/src/decompose.rs:3918"
+  "kanimiso/src/cluster.rs:3547"
+)
 # ------------------------------------------------------------------------------
 fail=0
 budget() { # name actual max
@@ -30,6 +45,20 @@ budget "R4 pub items (kanimiso)" "$r4" "$MAX_R4_PUB_ITEMS"
 r5=$(find $SRC -name '*.rs' | xargs wc -l | grep -v ' total$' | awk '$1>3000' | wc -l)
 budget "R5 files over 3000 lines" "$r5" "$MAX_R5_FILES_OVER_3000"
 
+while IFS= read -r path; do
+  actual=$(wc -l < "$path")
+  [ "$actual" -le 3000 ] && continue
+  maximum=""
+  for spec in "${R5_FILE_LINE_BUDGETS[@]}"; do
+    if [ "${spec%%:*}" = "$path" ]; then maximum="${spec##*:}"; break; fi
+  done
+  if [ -z "$maximum" ]; then
+    echo "FAIL R5 unbudgeted file over 3000 lines: $path ($actual)"; fail=1
+  else
+    budget "R5 lines $path" "$actual" "$maximum"
+  fi
+done < <(find $SRC -name '*.rs')
+
 r7=$(grep -rhE '\.max\(1e-[0-9]+\)\.ln\(\)|\.clamp\(0\.0, 1\.0 - 1e' --include='*.rs' $SRC | wc -l)
 budget "R7 density floor / probability clamp" "$r7" "$MAX_R7_DENSITY_FLOORS"
 
@@ -40,10 +69,10 @@ if [ "$ALLOW_RUST_MIN_STACK" -eq 0 ] && grep -q RUST_MIN_STACK .cargo/config.tom
   echo "FAIL RUST_MIN_STACK is forbidden"; fail=1; fi
 
 # Invert tree lists dependents too; count distinct `faer v…` roots (D6).
-faer_versions=$(cargo tree -i faer -e normal --prefix none 2>/dev/null | awk '/^faer /' | sort -u | wc -l)
+faer_versions=$(cargo tree --locked -i faer -e normal --prefix none 2>/dev/null | awk '/^faer /' | sort -u | wc -l)
 if [ "$faer_versions" -gt 1 ]; then echo "FAIL multiple faer versions in the graph"; fail=1; fi
 
-ndarray_versions=$(cargo tree -i ndarray -e normal --prefix none 2>/dev/null | awk '/^ndarray /' | sort -u | wc -l)
+ndarray_versions=$(cargo tree --locked -i ndarray -e normal --prefix none 2>/dev/null | awk '/^ndarray /' | sort -u | wc -l)
 if [ "$ndarray_versions" -gt 1 ]; then echo "FAIL multiple ndarray versions in the graph"; fail=1; fi
 
 exit $fail

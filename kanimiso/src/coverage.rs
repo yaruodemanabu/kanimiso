@@ -24,7 +24,10 @@ pub enum CoverageStatus {
 pub struct Algorithm {
     /// Rust path (`"linear_model.LinearRegression"`).
     pub name: &'static str,
-    /// Independent implementation or specification used as a reference.
+    /// Python ecosystem analogue or published specification for navigation.
+    ///
+    /// This field does not assert that the named package generated the golden
+    /// fixture. Actual oracle provenance is documented in `docs/validation.md`.
     pub python_equiv: &'static str,
     /// Broad algorithm category.
     pub kind: &'static str,
@@ -62,6 +65,102 @@ const fn a(name: &'static str, python_equiv: &'static str, kind: &'static str) -
 }
 
 const INVENTORY: &[Algorithm] = &[
+    v("number_ruler.LinearModel", "statsmodels.OLS", "regression"),
+    v(
+        "number_ruler.GeneralizedLinearModel",
+        "statsmodels.GLM.canonical",
+        "regression",
+    ),
+    v(
+        "number_ruler.linear_shap",
+        "SHAP.interventional_linear_predictor",
+        "interpretation",
+    ),
+    a(
+        "number_ruler.MixedModel",
+        "statsmodels.MixedLM / marginal-ML GLMM",
+        "regression",
+    ),
+    a(
+        "number_ruler.AdditiveModel",
+        "linear-spline LAM / GAM",
+        "regression",
+    ),
+    v(
+        "oldwood.DecisionTreeClassifier",
+        "sklearn.tree.DecisionTreeClassifier",
+        "tree",
+    ),
+    v(
+        "oldwood.DecisionTreeRegressor",
+        "sklearn.tree.DecisionTreeRegressor",
+        "tree",
+    ),
+    a(
+        "mayoi_no_mori.RandomForestClassifier",
+        "sklearn.ensemble.RandomForestClassifier",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.RandomForestRegressor",
+        "sklearn.ensemble.RandomForestRegressor",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.ExtraTreesClassifier",
+        "sklearn.ensemble.ExtraTreesClassifier",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.ExtraTreesRegressor",
+        "sklearn.ensemble.ExtraTreesRegressor",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.GradientBoostingClassifier",
+        "sklearn.ensemble.GradientBoostingClassifier",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.GradientBoostingRegressor",
+        "sklearn.ensemble.GradientBoostingRegressor",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.AdaBoostClassifier",
+        "sklearn.ensemble.AdaBoostClassifier",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.AdaBoostRegressor",
+        "sklearn.ensemble.AdaBoostRegressor",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.IsolationForest",
+        "sklearn.ensemble.IsolationForest",
+        "anomaly",
+    ),
+    a(
+        "mayoi_no_mori.LightGbmClassifier",
+        "lightgbm.LGBMClassifier",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.LightGbmRegressor",
+        "lightgbm.LGBMRegressor",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.CatBoostClassifier",
+        "catboost.CatBoostClassifier",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.CatBoostRegressor",
+        "catboost.CatBoostRegressor",
+        "ensemble",
+    ),
     v(
         "linear_model.LinearRegression",
         "sklearn.linear_model.LinearRegression",
@@ -92,7 +191,7 @@ const INVENTORY: &[Algorithm] = &[
     ),
     v("special.betainc_reg", "scipy.special.betainc", "function"),
     v("special.chi2_cdf", "scipy.stats.chi2.cdf", "function"),
-    v("special.chi2_pvalue", "scipy.stats.chi2.sf", "function"),
+    a("special.chi2_pvalue", "scipy.stats.chi2.sf", "function"),
     v("special.digamma", "scipy.special.digamma", "function"),
     v("special.erf", "scipy.special.erf", "function"),
     v("special.f_cdf", "scipy.stats.f.cdf", "function"),
@@ -228,6 +327,11 @@ mod tests {
     use super::*;
 
     const VERIFIED_NAMES: &[&str] = &[
+        "number_ruler.LinearModel",
+        "number_ruler.GeneralizedLinearModel",
+        "number_ruler.linear_shap",
+        "oldwood.DecisionTreeClassifier",
+        "oldwood.DecisionTreeRegressor",
         "linear_model.LinearRegression",
         "online.LinearRegression",
         "online.OnlineAutoCorr",
@@ -242,7 +346,6 @@ mod tests {
         "online.OnlineWeightedMean",
         "special.betainc_reg",
         "special.chi2_cdf",
-        "special.chi2_pvalue",
         "special.digamma",
         "special.erf",
         "special.f_cdf",
@@ -294,6 +397,12 @@ mod tests {
     #[test]
     fn registered_paths_link_to_active_symbols() {
         fn type_exists<T>() {}
+
+        type_exists::<crate::number_ruler::LinearModel>();
+        type_exists::<crate::number_ruler::GeneralizedLinearModel>();
+        type_exists::<crate::number_ruler::MixedModel>();
+        type_exists::<crate::number_ruler::AdditiveModel>();
+        let _ = crate::number_ruler::linear_shap;
 
         type_exists::<crate::linear_model::LinearRegression>();
         type_exists::<crate::online::LinearRegression>();

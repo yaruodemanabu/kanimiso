@@ -1,752 +1,226 @@
-//! CART trees, bagged forests, boosting, and isolation forests.
+//! Kanimiso adapters for the standalone tree crates.
 //!
-//! Every `fit` / `predict` opens a [`crate::context::FitCtx`] so `signlred`
-//! diagnoses (`SingleClass`, `EmptyClass`, `ConstantTarget`, constant
-//! predictors, …) and `ojizou-san` records the session. A silent successful
-//! fit is a bug.
+//! [`oldwood`] owns the deterministic CART kernel. [`mayoi_no_mori`] owns
+//! resampling, random feature proposals, boosting, and isolation trees. This
+//! module only translates Kanimiso's [`Fit`], [`Predict`], quality-report, and
+//! floating-label conventions; it contains no split-search or tree-growth
+//! implementation.
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::rng::Rng;
-use crate::traits::{Fit, FitUnsupervised, Predict, Transform};
+use crate::traits::{Fit, FitUnsupervised, Predict};
 use crate::validate::{inspect_classes, inspect_xy};
+use mayoi_no_mori::{
+    AdaBoostR2Options, BoostingOptions, FeatureSampling, ForestOptions, IsolationForestOptions,
+    SammeOptions,
+};
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, Meaninglessness, Qualified, Result};
+use signlred::{slice_stats, Issue, IssueCode, Meaninglessness, Qualified, Result};
 
-/// Euler–Mascheroni constant used by the Isolation Forest path-length offset.
-const EULER_GAMMA: f64 = 0.5772156649015329;
-
-/// Average unsuccessful BST path length \(c(n)\) (Liu et al., Isolation Forest).
-///
-/// The anomaly module reuses this offset when it scores path lengths.
-pub fn isolation_c_factor(n: f64) -> f64 {
-    if n <= 1.0 {
-        0.0
-    } else if n <= 2.0 {
-        1.0
-    } else {
-        let nm1 = n - 1.0;
-        2.0 * (nm1.ln() + EULER_GAMMA) - 2.0 * nm1 / n
-    }
-}
-
-fn class_index(lab: i64, classes: &[i64]) -> Option<usize> {
-    classes.iter().position(|&c| c == lab)
-}
-
-fn majority(classes: &[i64], counts: &[f64]) -> i64 {
-    let mut best_i = 0usize;
-    let mut best = f64::NEG_INFINITY;
-    for (i, &c) in counts.iter().enumerate() {
-        if c > best + 1e-15 || ((c - best).abs() <= 1e-15 && classes[i] < classes[best_i]) {
-            best = c;
-            best_i = i;
+fn oldwood_issue(error: &oldwood::Error) -> IssueCode {
+    match error {
+        oldwood::Error::EmptyTrainingData | oldwood::Error::EmptyFeatures => IssueCode::EmptyMatrix,
+        oldwood::Error::TargetLength { .. }
+        | oldwood::Error::WeightLength { .. }
+        | oldwood::Error::FeatureCount { .. }
+        | oldwood::Error::InvalidMatrixStorage { .. } => IssueCode::DimensionMismatch,
+        oldwood::Error::NonFiniteFeature { .. } | oldwood::Error::NonFiniteTarget { .. } => {
+            IssueCode::NonFiniteInput
         }
-    }
-    classes[best_i]
-}
-
-fn gini(counts: &[f64]) -> f64 {
-    let tot: f64 = counts.iter().sum();
-    if tot <= 0.0 {
-        return 0.0;
-    }
-    let mut s = 0.0;
-    for &c in counts {
-        let p = c / tot;
-        s += p * p;
-    }
-    1.0 - s
-}
-
-fn weighted_counts(y: &[i64], classes: &[i64], idx: &[usize], weights: &[f64]) -> Vec<f64> {
-    let mut counts = vec![0.0; classes.len()];
-    for &i in idx {
-        if let Some(k) = class_index(y[i], classes) {
-            counts[k] += weights[i];
+        oldwood::Error::InvalidWeight { .. } | oldwood::Error::NoPositiveWeight => {
+            IssueCode::InvalidWeight
         }
+        oldwood::Error::NumericalOverflow { .. } => IssueCode::NumericalOverflow,
+        _ => IssueCode::InvalidParameter,
     }
-    counts
 }
 
-fn split_index(
-    x: &Matrix,
-    idx: &[usize],
-    feature: usize,
-    threshold: f64,
-) -> (Vec<usize>, Vec<usize>) {
-    let mut left = Vec::new();
-    let mut right = Vec::new();
-    for &i in idx {
-        if x.get(i, feature) <= threshold {
-            left.push(i);
-        } else {
-            right.push(i);
+fn mayoi_issue(error: &mayoi_no_mori::Error) -> IssueCode {
+    match error {
+        mayoi_no_mori::Error::Tree(error) => oldwood_issue(error),
+        mayoi_no_mori::Error::EmptyTrainingData | mayoi_no_mori::Error::EmptyFeatures => {
+            IssueCode::EmptyMatrix
         }
+        mayoi_no_mori::Error::Length { .. } | mayoi_no_mori::Error::FeatureCount { .. } => {
+            IssueCode::DimensionMismatch
+        }
+        mayoi_no_mori::Error::NonFinite { .. } => IssueCode::NonFiniteInput,
+        mayoi_no_mori::Error::NegativeWeight { .. } | mayoi_no_mori::Error::NoPositiveWeight => {
+            IssueCode::InvalidWeight
+        }
+        mayoi_no_mori::Error::NumericalOverflow { .. } => IssueCode::NumericalOverflow,
+        _ => IssueCode::InvalidParameter,
     }
-    (left, right)
 }
 
-fn feature_subset(
-    p: usize,
+#[allow(clippy::result_large_err)] // Kanimiso's quality-preserving Result owns a complete Report.
+fn fail<T>(mut ctx: FitCtx, code: IssueCode, message: impl Into<String>) -> Result<Qualified<T>> {
+    ctx.push(Issue::builder(code).message(message).build());
+    Err(ctx.finish_failure())
+}
+
+#[allow(clippy::result_large_err)] // Adapter must retain Kanimiso's public failure contract.
+fn fail_oldwood<T>(ctx: FitCtx, operation: &str, error: oldwood::Error) -> Result<Qualified<T>> {
+    let code = oldwood_issue(&error);
+    fail(ctx, code, format!("{operation}: {error}"))
+}
+
+#[allow(clippy::result_large_err)] // Adapter must retain Kanimiso's public failure contract.
+pub(crate) fn fail_mayoi<T>(
+    ctx: FitCtx,
+    operation: &str,
+    error: mayoi_no_mori::Error,
+) -> Result<Qualified<T>> {
+    let code = mayoi_issue(&error);
+    fail(ctx, code, format!("{operation}: {error}"))
+}
+
+fn tree_options(
+    max_depth: usize,
+    min_samples_split: usize,
     max_features: Option<usize>,
-    rng: &mut Rng,
-    sqrt_default: bool,
-) -> Vec<usize> {
-    if p == 0 {
-        return Vec::new();
+) -> oldwood::TreeOptions {
+    oldwood::TreeOptions {
+        max_depth: Some(max_depth),
+        min_samples_split,
+        max_features,
+        ..oldwood::TreeOptions::default()
     }
-    let k = match max_features {
-        Some(m) => m.max(1).min(p),
-        None if sqrt_default => ((p as f64).sqrt().ceil() as usize).max(1).min(p),
-        None => p,
-    };
-    rng.sample_indices(p, k)
 }
 
-fn diagnose_constant_predictions(ctx: &mut FitCtx, pred: &Vector, y: &Vector) {
-    let pst = signlred::slice_stats(pred.as_slice());
-    let yst = signlred::slice_stats(y.as_slice());
-    if pst.is_constant(ctx.policy.near_zero_variance)
-        && !yst.is_constant(ctx.policy.near_zero_variance)
+fn ensemble_tree_options(max_depth: usize, min_samples_split: usize) -> oldwood::TreeOptions {
+    tree_options(max_depth, min_samples_split, None)
+}
+
+pub(crate) fn encoded_labels(ctx: &mut FitCtx, y: &Vector) -> (Vec<i64>, Vec<usize>) {
+    let labels: Vec<Option<i64>> = y
+        .as_slice()
+        .iter()
+        .enumerate()
+        .map(|(row, &value)| checked_label(ctx, row, value))
+        .collect();
+    let valid_labels = Vector::from_iter(labels.iter().flatten().map(|&label| label as f64));
+    let classes: Vec<i64> = inspect_classes(&mut ctx.report, &valid_labels, &ctx.policy)
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect();
+    let encoded = labels
+        .iter()
+        .map(|label| {
+            label.map_or(0, |label| {
+                classes
+                    .binary_search(&label)
+                    .expect("classes were constructed from every valid label")
+            })
+        })
+        .collect();
+    (classes, encoded)
+}
+
+fn checked_label(ctx: &mut FitCtx, row: usize, value: f64) -> Option<i64> {
+    if !value.is_finite() {
+        return None;
+    }
+    let rounded = value.round();
+    let minimum = i64::MIN as f64;
+    let maximum_exclusive = -minimum;
+    if value != rounded || rounded < minimum || rounded >= maximum_exclusive {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidParameter)
+                .message(format!(
+                    "classification label at row {row} is {value}; labels must be integer-valued and representable as i64"
+                ))
+                .build(),
+        );
+        None
+    } else {
+        Some(rounded as i64)
+    }
+}
+
+fn decoded(labels: &[usize], classes: &[i64]) -> core::result::Result<Vector, usize> {
+    labels
+        .iter()
+        .map(|&label| {
+            classes
+                .get(label)
+                .copied()
+                .map(|class| class as f64)
+                .ok_or(label)
+        })
+        .collect::<core::result::Result<Vec<_>, _>>()
+        .map(Vector::from_iter)
+}
+
+pub(crate) fn finish_decoded(
+    ctx: FitCtx,
+    labels: &[usize],
+    classes: &[i64],
+    operation: &str,
+) -> Result<Qualified<Vector>> {
+    match decoded(labels, classes) {
+        Ok(values) => ctx.finish(values),
+        Err(label) => fail(
+            ctx,
+            IssueCode::NonFiniteOutput,
+            format!("{operation}: estimator returned unknown class index {label}"),
+        ),
+    }
+}
+
+fn diagnose_constant_predictions(ctx: &mut FitCtx, prediction: &Vector, target: &Vector) {
+    let prediction_stats = slice_stats(prediction.as_slice());
+    let target_stats = slice_stats(target.as_slice());
+    if prediction_stats.is_constant(ctx.policy.near_zero_variance)
+        && !target_stats.is_constant(ctx.policy.near_zero_variance)
     {
         ctx.push(
             Issue::builder(IssueCode::PredictionsAreConstant)
-                .message("in-sample predictions are a constant while y is not")
+                .message("in-sample predictions are constant while the target is not")
                 .meaninglessness(Meaninglessness::vacuous(
                     "tree / ensemble predictor",
-                    "the fitted rule collapsed to a single label or value",
-                    "increase depth, lower min_samples_split, or collect a separable sample",
+                    "the fitted rule collapsed to one label or value",
+                    "increase depth, relax leaf constraints, or collect separable features",
                 ))
                 .build(),
         );
     }
 }
 
-fn labels_of(y: &Vector) -> Vec<i64> {
-    y.as_slice()
-        .iter()
-        .map(|&v| if v.is_finite() { v.round() as i64 } else { 0 })
-        .collect()
-}
-
-fn unit_weights(n: usize) -> Vec<f64> {
-    vec![1.0; n]
-}
-
-fn weighted_bootstrap(w: &[f64], rng: &mut Rng) -> Vec<usize> {
-    let n = w.len();
-    let mut cdf = vec![0.0; n];
-    let mut acc = 0.0;
-    for i in 0..n {
-        acc += w[i].max(0.0);
-        cdf[i] = acc;
-    }
-    if acc <= 0.0 || n == 0 {
-        return (0..n).collect();
-    }
-    (0..n)
-        .map(|_| {
-            let u = rng.uniform() * acc;
-            cdf.iter().position(|&c| c >= u).unwrap_or(n - 1)
-        })
-        .collect()
-}
-
-/// Classification tree node.
-#[derive(Clone, Debug)]
-enum ClassNode {
-    Leaf {
-        class: i64,
-        counts: Vec<f64>,
-    },
-    Split {
-        feature: usize,
-        threshold: f64,
-        left: Box<ClassNode>,
-        right: Box<ClassNode>,
-    },
-}
-
-/// Regression tree node.
-#[derive(Clone, Debug)]
-enum RegNode {
-    Leaf {
-        value: f64,
-        n: f64,
-    },
-    Split {
-        feature: usize,
-        threshold: f64,
-        left: Box<RegNode>,
-        right: Box<RegNode>,
-    },
-}
-
-/// Isolation tree node.
-#[derive(Clone, Debug)]
-enum IsoNode {
-    External {
-        size: usize,
-        depth: usize,
-    },
-    Internal {
-        feature: usize,
-        threshold: f64,
-        left: Box<IsoNode>,
-        right: Box<IsoNode>,
-    },
-}
-
-fn class_leaf(classes: &[i64], counts: &[f64]) -> ClassNode {
-    ClassNode::Leaf {
-        class: majority(classes, counts),
-        counts: counts.to_vec(),
-    }
-}
-
-fn class_gain(
+#[allow(clippy::result_large_err)] // A failed nested prediction retains its complete report.
+pub(crate) fn finish_with_prediction_diagnostic<F>(
+    mut ctx: FitCtx,
+    fitted: F,
     x: &Matrix,
-    y: &[i64],
-    classes: &[i64],
-    idx: &[usize],
-    weights: &[f64],
-    feature: usize,
-    threshold: f64,
-    parent_g: f64,
-    parent_w: f64,
-) -> f64 {
-    let k = classes.len();
-    let mut left = vec![0.0; k];
-    let mut left_w = 0.0;
-    let mut right = vec![0.0; k];
-    let mut right_w = 0.0;
-    for &i in idx {
-        let Some(c) = class_index(y[i], classes) else {
-            continue;
-        };
-        if x.get(i, feature) <= threshold {
-            left[c] += weights[i];
-            left_w += weights[i];
-        } else {
-            right[c] += weights[i];
-            right_w += weights[i];
+    target: &Vector,
+) -> Result<Qualified<F>>
+where
+    F: Predict<Output = Vector>,
+{
+    match fitted.predict(x, &ctx.session.child("in_sample_diagnostic")) {
+        Ok(prediction) => {
+            ctx.report.merge(prediction.report);
+            diagnose_constant_predictions(&mut ctx, &prediction.value, target);
+            ctx.finish(fitted)
         }
-    }
-    if left_w <= 0.0 || right_w <= 0.0 || parent_w <= 0.0 {
-        return 0.0;
-    }
-    parent_g - (left_w / parent_w) * gini(&left) - (right_w / parent_w) * gini(&right)
-}
-
-fn best_class_split(
-    x: &Matrix,
-    y: &[i64],
-    classes: &[i64],
-    idx: &[usize],
-    weights: &[f64],
-    feats: &[usize],
-    extra: bool,
-    rng: &mut Rng,
-    eps: f64,
-) -> Option<(usize, f64)> {
-    let parent = weighted_counts(y, classes, idx, weights);
-    let parent_w: f64 = parent.iter().sum();
-    if parent_w <= 0.0 {
-        return None;
-    }
-    let parent_g = gini(&parent);
-    let mut best_gain = 1e-15;
-    let mut best = None;
-    for &f in feats {
-        if extra {
-            let mut mn = f64::INFINITY;
-            let mut mx = f64::NEG_INFINITY;
-            for &i in idx {
-                let v = x.get(i, f);
-                mn = mn.min(v);
-                mx = mx.max(v);
-            }
-            if !mn.is_finite() || mx - mn <= eps {
-                continue;
-            }
-            let thr = rng.uniform_range(mn, mx);
-            let gain = class_gain(x, y, classes, idx, weights, f, thr, parent_g, parent_w);
-            if gain > best_gain {
-                best_gain = gain;
-                best = Some((f, thr));
-            }
-        } else {
-            let mut pts: Vec<(f64, usize)> =
-                idx.iter().copied().map(|i| (x.get(i, f), i)).collect();
-            pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            let k = classes.len();
-            let mut left = vec![0.0; k];
-            let mut left_w = 0.0;
-            for s in 0..pts.len().saturating_sub(1) {
-                let i = pts[s].1;
-                if let Some(c) = class_index(y[i], classes) {
-                    left[c] += weights[i];
-                    left_w += weights[i];
-                }
-                if (pts[s + 1].0 - pts[s].0).abs() <= eps {
-                    continue;
-                }
-                let right_w = parent_w - left_w;
-                if left_w <= 0.0 || right_w <= 0.0 {
-                    continue;
-                }
-                let mut right = vec![0.0; k];
-                for c in 0..k {
-                    right[c] = parent[c] - left[c];
-                }
-                let gain = parent_g
-                    - (left_w / parent_w) * gini(&left)
-                    - (right_w / parent_w) * gini(&right);
-                if gain > best_gain {
-                    best_gain = gain;
-                    best = Some((f, 0.5 * (pts[s].0 + pts[s + 1].0)));
-                }
-            }
-        }
-    }
-    best
-}
-
-fn grow_class(
-    x: &Matrix,
-    y: &[i64],
-    classes: &[i64],
-    idx: &[usize],
-    weights: &[f64],
-    depth: usize,
-    max_depth: usize,
-    min_samples_split: usize,
-    max_features: Option<usize>,
-    extra: bool,
-    sqrt_features: bool,
-    rng: &mut Rng,
-    eps: f64,
-) -> ClassNode {
-    let counts = weighted_counts(y, classes, idx, weights);
-    let n_eff = counts.iter().sum::<f64>();
-    let pure = counts.iter().filter(|&&c| c > 0.0).count() <= 1;
-    if depth >= max_depth || idx.len() < min_samples_split.max(2) || n_eff <= 0.0 || pure {
-        return class_leaf(classes, &counts);
-    }
-    let feats = feature_subset(x.ncols(), max_features, rng, sqrt_features);
-    let Some((feature, threshold)) =
-        best_class_split(x, y, classes, idx, weights, &feats, extra, rng, eps)
-    else {
-        return class_leaf(classes, &counts);
-    };
-    let (left, right) = split_index(x, idx, feature, threshold);
-    if left.is_empty() || right.is_empty() {
-        return class_leaf(classes, &counts);
-    }
-    ClassNode::Split {
-        feature,
-        threshold,
-        left: Box::new(grow_class(
-            x,
-            y,
-            classes,
-            &left,
-            weights,
-            depth + 1,
-            max_depth,
-            min_samples_split,
-            max_features,
-            extra,
-            sqrt_features,
-            rng,
-            eps,
-        )),
-        right: Box::new(grow_class(
-            x,
-            y,
-            classes,
-            &right,
-            weights,
-            depth + 1,
-            max_depth,
-            min_samples_split,
-            max_features,
-            extra,
-            sqrt_features,
-            rng,
-            eps,
-        )),
+        Err(failure) => Err(ctx.merge_failure(failure)),
     }
 }
 
-fn predict_class_one(node: &ClassNode, x: &Matrix, i: usize) -> i64 {
-    match node {
-        ClassNode::Leaf { class, .. } => *class,
-        ClassNode::Split {
-            feature,
-            threshold,
-            left,
-            right,
-        } => {
-            if x.get(i, *feature) <= *threshold {
-                predict_class_one(left, x, i)
-            } else {
-                predict_class_one(right, x, i)
-            }
-        }
-    }
+fn feature_sampling(value: Option<usize>, fallback: FeatureSampling) -> FeatureSampling {
+    value.map_or(fallback, FeatureSampling::Count)
 }
 
-fn predict_class_proba(node: &ClassNode, x: &Matrix, i: usize, k: usize) -> Vec<f64> {
-    match node {
-        ClassNode::Leaf { counts, .. } => {
-            let tot: f64 = counts.iter().sum::<f64>().max(1e-15);
-            let mut p = vec![0.0; k];
-            for (j, &c) in counts.iter().enumerate().take(k) {
-                p[j] = (c / tot).max(1e-15);
-            }
-            p
-        }
-        ClassNode::Split {
-            feature,
-            threshold,
-            left,
-            right,
-        } => {
-            if x.get(i, *feature) <= *threshold {
-                predict_class_proba(left, x, i, k)
-            } else {
-                predict_class_proba(right, x, i, k)
-            }
-        }
-    }
-}
-
-fn predict_class_vec(node: &ClassNode, x: &Matrix) -> Vector {
-    Vector::from_iter((0..x.nrows()).map(|i| predict_class_one(node, x, i) as f64))
-}
-
-fn is_class_stump(node: &ClassNode) -> bool {
-    matches!(node, ClassNode::Leaf { .. })
-}
-
-fn mse_of(ys: &[f64], idx: &[usize], weights: &[f64]) -> (f64, f64, f64) {
-    let mut wsum = 0.0;
-    let mut s = 0.0;
-    for &i in idx {
-        wsum += weights[i];
-        s += weights[i] * ys[i];
-    }
-    if wsum <= 0.0 {
-        return (0.0, 0.0, 0.0);
-    }
-    let mean = s / wsum;
-    let mut sse = 0.0;
-    for &i in idx {
-        let d = ys[i] - mean;
-        sse += weights[i] * d * d;
-    }
-    (mean, sse, wsum)
-}
-
-fn best_reg_split(
-    x: &Matrix,
-    ys: &[f64],
-    idx: &[usize],
-    weights: &[f64],
-    feats: &[usize],
-    extra: bool,
-    rng: &mut Rng,
-    eps: f64,
-) -> Option<(usize, f64)> {
-    let (parent_mean, parent_sse, parent_w) = mse_of(ys, idx, weights);
-    let _ = parent_mean;
-    if parent_w <= 0.0 || parent_sse <= 0.0 {
-        return None;
-    }
-    let mut best_gain = 1e-15;
-    let mut best = None;
-    for &f in feats {
-        if extra {
-            let mut mn = f64::INFINITY;
-            let mut mx = f64::NEG_INFINITY;
-            for &i in idx {
-                let v = x.get(i, f);
-                mn = mn.min(v);
-                mx = mx.max(v);
-            }
-            if mx - mn <= eps {
-                continue;
-            }
-            let thr = rng.uniform_range(mn, mx);
-            let (left, right) = split_index(x, idx, f, thr);
-            let (_, ls, lw) = mse_of(ys, &left, weights);
-            let (_, rs, rw) = mse_of(ys, &right, weights);
-            if lw <= 0.0 || rw <= 0.0 {
-                continue;
-            }
-            let gain = parent_sse - ls - rs;
-            if gain > best_gain {
-                best_gain = gain;
-                best = Some((f, thr));
-            }
-        } else {
-            let mut pts: Vec<(f64, usize)> =
-                idx.iter().copied().map(|i| (x.get(i, f), i)).collect();
-            pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            let mut left_w = 0.0;
-            let mut left_s = 0.0;
-            for s in 0..pts.len().saturating_sub(1) {
-                let i = pts[s].1;
-                left_w += weights[i];
-                left_s += weights[i] * ys[i];
-                if (pts[s + 1].0 - pts[s].0).abs() <= eps {
-                    continue;
-                }
-                let right_w = parent_w - left_w;
-                if left_w <= 0.0 || right_w <= 0.0 {
-                    continue;
-                }
-                let mut left_sse = 0.0;
-                let lmean = left_s / left_w;
-                let mut right_s = 0.0;
-                let mut right_sse_w = 0.0;
-                for &j in idx {
-                    if x.get(j, f) <= 0.5 * (pts[s].0 + pts[s + 1].0) {
-                        let d = ys[j] - lmean;
-                        left_sse += weights[j] * d * d;
-                    } else {
-                        right_s += weights[j] * ys[j];
-                        right_sse_w += weights[j];
-                    }
-                }
-                if right_sse_w <= 0.0 {
-                    continue;
-                }
-                let rmean = right_s / right_sse_w;
-                let mut right_sse = 0.0;
-                for &j in idx {
-                    if x.get(j, f) > 0.5 * (pts[s].0 + pts[s + 1].0) {
-                        let d = ys[j] - rmean;
-                        right_sse += weights[j] * d * d;
-                    }
-                }
-                let gain = parent_sse - left_sse - right_sse;
-                if gain > best_gain {
-                    best_gain = gain;
-                    best = Some((f, 0.5 * (pts[s].0 + pts[s + 1].0)));
-                }
-            }
-        }
-    }
-    best
-}
-
-fn grow_reg(
-    x: &Matrix,
-    ys: &[f64],
-    idx: &[usize],
-    weights: &[f64],
-    depth: usize,
-    max_depth: usize,
-    min_samples_split: usize,
-    max_features: Option<usize>,
-    extra: bool,
-    rng: &mut Rng,
-    eps: f64,
-) -> RegNode {
-    let (mean, sse, wsum) = mse_of(ys, idx, weights);
-    if depth >= max_depth || idx.len() < min_samples_split.max(2) || sse <= eps || wsum <= 0.0 {
-        return RegNode::Leaf {
-            value: mean,
-            n: wsum,
-        };
-    }
-    let feats = feature_subset(x.ncols(), max_features, rng, false);
-    let Some((feature, threshold)) = best_reg_split(x, ys, idx, weights, &feats, extra, rng, eps)
-    else {
-        return RegNode::Leaf {
-            value: mean,
-            n: wsum,
-        };
-    };
-    let (left, right) = split_index(x, idx, feature, threshold);
-    if left.is_empty() || right.is_empty() {
-        return RegNode::Leaf {
-            value: mean,
-            n: wsum,
-        };
-    }
-    RegNode::Split {
-        feature,
-        threshold,
-        left: Box::new(grow_reg(
-            x,
-            ys,
-            &left,
-            weights,
-            depth + 1,
-            max_depth,
-            min_samples_split,
-            max_features,
-            extra,
-            rng,
-            eps,
-        )),
-        right: Box::new(grow_reg(
-            x,
-            ys,
-            &right,
-            weights,
-            depth + 1,
-            max_depth,
-            min_samples_split,
-            max_features,
-            extra,
-            rng,
-            eps,
-        )),
-    }
-}
-
-fn predict_reg_one(node: &RegNode, x: &Matrix, i: usize) -> f64 {
-    match node {
-        RegNode::Leaf { value, .. } => *value,
-        RegNode::Split {
-            feature,
-            threshold,
-            left,
-            right,
-        } => {
-            if x.get(i, *feature) <= *threshold {
-                predict_reg_one(left, x, i)
-            } else {
-                predict_reg_one(right, x, i)
-            }
-        }
-    }
-}
-
-fn predict_reg_vec(node: &RegNode, x: &Matrix) -> Vector {
-    Vector::from_iter((0..x.nrows()).map(|i| predict_reg_one(node, x, i)))
-}
-
-fn rewrite_logistic_leaves(node: &mut RegNode, x: &Matrix, r: &[f64], p: &[f64], idx: &[usize]) {
-    match node {
-        RegNode::Leaf { value, n } => {
-            let mut num = 0.0;
-            let mut den = 0.0;
-            for &i in idx {
-                num += r[i];
-                den += p[i] * (1.0 - p[i]);
-            }
-            *value = num / den.max(1e-12);
-            *n = idx.len() as f64;
-        }
-        RegNode::Split {
-            feature,
-            threshold,
-            left,
-            right,
-        } => {
-            let (l, rg) = split_index(x, idx, *feature, *threshold);
-            rewrite_logistic_leaves(left, x, r, p, &l);
-            rewrite_logistic_leaves(right, x, r, p, &rg);
-        }
-    }
-}
-
-fn grow_iso(x: &Matrix, idx: &[usize], depth: usize, max_depth: usize, rng: &mut Rng) -> IsoNode {
-    if depth >= max_depth || idx.len() <= 1 {
-        return IsoNode::External {
-            size: idx.len(),
-            depth,
-        };
-    }
-    let p = x.ncols();
-    let mut order: Vec<usize> = (0..p).collect();
-    rng.shuffle(&mut order);
-    for &f in &order {
-        let mut mn = f64::INFINITY;
-        let mut mx = f64::NEG_INFINITY;
-        for &i in idx {
-            let v = x.get(i, f);
-            mn = mn.min(v);
-            mx = mx.max(v);
-        }
-        if mx - mn <= 1e-15 {
-            continue;
-        }
-        let thr = rng.uniform_range(mn, mx);
-        let (left, right) = split_index(x, idx, f, thr);
-        if left.is_empty() || right.is_empty() {
-            continue;
-        }
-        return IsoNode::Internal {
-            feature: f,
-            threshold: thr,
-            left: Box::new(grow_iso(x, &left, depth + 1, max_depth, rng)),
-            right: Box::new(grow_iso(x, &right, depth + 1, max_depth, rng)),
-        };
-    }
-    IsoNode::External {
-        size: idx.len(),
-        depth,
-    }
-}
-
-fn iso_path(node: &IsoNode, x: &Matrix, i: usize) -> f64 {
-    match node {
-        IsoNode::External { size, depth } => *depth as f64 + isolation_c_factor(*size as f64),
-        IsoNode::Internal {
-            feature,
-            threshold,
-            left,
-            right,
-        } => {
-            if x.get(i, *feature) <= *threshold {
-                iso_path(left, x, i)
-            } else {
-                iso_path(right, x, i)
-            }
-        }
-    }
-}
-
-fn bootstrap_idx(rng: &mut Rng, n: usize) -> Vec<usize> {
-    (0..n).map(|_| rng.below(n)).collect()
-}
-
-fn vote_labels(classes: &[i64], votes: &[f64]) -> i64 {
-    majority(classes, votes)
-}
-
-fn predict_shape_guard(ctx: &mut FitCtx, x: &Matrix, n_features: usize) {
-    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-    if x.ncols() != n_features {
-        ctx.push(
-            Issue::builder(IssueCode::DimensionMismatch)
-                .message(format!(
-                    "predict X is n×{} but the model was fit on {} features",
-                    x.ncols(),
-                    n_features
-                ))
-                .build(),
-        );
-    }
-}
-
-/// CART classifier using Gini impurity.
+/// Deterministic CART classifier backed by [`oldwood`].
 #[derive(Clone, Debug)]
 pub struct DecisionTreeClassifier {
-    /// Maximum tree depth (root is depth 0; `0` yields a stump leaf).
+    /// Maximum tree depth (root is depth zero).
     pub max_depth: usize,
-    /// Minimum samples required to attempt a split.
+    /// Minimum positive-weight rows required before attempting a split.
     pub min_samples_split: usize,
-    /// Feature subsample size at each node (`None` = all features).
+    /// Number of leading features considered by deterministic CART.
     pub max_features: Option<usize>,
-    /// PRNG seed.
+    /// Compatibility field; exhaustive CART does not consume randomness.
     pub seed: u64,
 }
 
@@ -762,16 +236,17 @@ impl Default for DecisionTreeClassifier {
 }
 
 impl DecisionTreeClassifier {
-    /// Default Gini tree (`max_depth = 8`).
+    /// Returns the documented defaults.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-/// Fitted CART classifier.
+/// Fitted Kanimiso classifier delegating traversal to [`oldwood`].
 #[derive(Clone, Debug)]
 pub struct FittedTreeClassifier {
-    root: ClassNode,
+    inner: oldwood::FittedClassifier,
     /// Sorted unique training labels.
     pub classes: Vec<i64>,
     /// Training feature count.
@@ -779,94 +254,101 @@ pub struct FittedTreeClassifier {
 }
 
 impl FittedTreeClassifier {
-    /// Class-probability vector for row `i` of `x` (aligned with [`Self::classes`]).
-    pub fn predict_proba_row(&self, x: &Matrix, i: usize) -> Vec<f64> {
-        predict_class_proba(&self.root, x, i, self.classes.len())
+    /// Returns the class-probability vector for one row.
+    ///
+    /// # Errors
+    ///
+    /// Returns a quality failure for an invalid matrix, an out-of-range row,
+    /// or an inconsistent class-probability shape.
+    pub fn predict_proba_row(
+        &self,
+        x: &Matrix,
+        row: usize,
+        session: &Session,
+    ) -> Result<Qualified<Vec<f64>>> {
+        let ctx = FitCtx::with_session(session.child("predict_proba_row"));
+        if row >= x.nrows() {
+            return fail(
+                ctx,
+                IssueCode::DimensionMismatch,
+                format!("probability row {row} is outside {} input rows", x.nrows()),
+            );
+        }
+        match self.inner.predict_proba(x) {
+            Ok(probabilities) => {
+                let width = self.classes.len();
+                let start = row.saturating_mul(width);
+                match probabilities
+                    .as_slice()
+                    .get(start..start.saturating_add(width))
+                {
+                    Some(values) => ctx.finish(values.to_vec()),
+                    None => fail(
+                        ctx,
+                        IssueCode::NonFiniteOutput,
+                        "CART probability output has an inconsistent shape",
+                    ),
+                }
+            }
+            Err(error) => fail_oldwood(ctx, "CART probability prediction", error),
+        }
     }
 }
 
 impl Predict for FittedTreeClassifier {
     type Output = Vector;
+
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
-        let mut ctx = FitCtx::with_session(session.child("predict"));
-        predict_shape_guard(&mut ctx, x, self.n_features);
-        ctx.finish(predict_class_vec(&self.root, x))
+        let ctx = FitCtx::with_session(session.child("predict"));
+        match self.inner.predict(x) {
+            Ok(labels) => finish_decoded(ctx, &labels, &self.classes, "CART prediction"),
+            Err(error) => fail_oldwood(ctx, "CART classification prediction", error),
+        }
     }
 }
 
 impl Fit for DecisionTreeClassifier {
     type Fitted = FittedTreeClassifier;
+
     fn fit(
         &mut self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
-    ) -> Result<Qualified<FittedTreeClassifier>> {
+    ) -> Result<Qualified<Self::Fitted>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
-        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
-        let classes: Vec<i64> = counts.iter().map(|(k, _)| *k).collect();
-        let ylab = labels_of(y);
-        let idx: Vec<usize> = (0..x.nrows()).collect();
-        let w = unit_weights(x.nrows());
-        let mut rng = Rng::new(self.seed);
-        let root = if classes.is_empty() {
-            ClassNode::Leaf {
-                class: 0,
-                counts: Vec::new(),
-            }
-        } else {
-            grow_class(
+        let (classes, target) = encoded_labels(&mut ctx, y);
+        let model = oldwood::DecisionTreeClassifier::new(
+            oldwood::ClassificationCriterion::Gini,
+            tree_options(self.max_depth, self.min_samples_split, self.max_features),
+        );
+        match model.fit(x, &target, None) {
+            Ok(inner) => finish_with_prediction_diagnostic(
+                ctx,
+                FittedTreeClassifier {
+                    inner,
+                    classes,
+                    n_features: x.ncols(),
+                },
                 x,
-                &ylab,
-                &classes,
-                &idx,
-                &w,
-                0,
-                self.max_depth,
-                self.min_samples_split,
-                self.max_features,
-                false,
-                false,
-                &mut rng,
-                ctx.policy.near_zero_variance,
-            )
-        };
-        let fitted = FittedTreeClassifier {
-            root,
-            classes,
-            n_features: x.ncols(),
-        };
-        if !is_class_stump(&fitted.root) {
-            ctx.session.converged("CART Gini split found", 0);
-        } else if counts.len() > 1 {
-            ctx.push(
-                Issue::builder(IssueCode::MeaninglessFit)
-                    .message("Gini CART produced a single leaf on a multi-class target")
-                    .meaninglessness(Meaninglessness::vacuous(
-                        "decision tree",
-                        "no split reduced Gini; the classifier is a constant",
-                        "check feature variation and hyperparameters",
-                    ))
-                    .build(),
-            );
+                y,
+            ),
+            Err(error) => fail_oldwood(ctx, "CART classification fit", error),
         }
-        let pred = predict_class_vec(&fitted.root, x);
-        diagnose_constant_predictions(&mut ctx, &pred, y);
-        ctx.finish(fitted)
     }
 }
 
-/// CART regressor using mean-squared-error impurity.
+/// Deterministic squared-error CART regressor backed by [`oldwood`].
 #[derive(Clone, Debug)]
 pub struct DecisionTreeRegressor {
     /// Maximum tree depth.
     pub max_depth: usize,
-    /// Minimum samples required to attempt a split.
+    /// Minimum positive-weight rows required before attempting a split.
     pub min_samples_split: usize,
-    /// Feature subsample size at each node (`None` = all features).
+    /// Number of leading features considered by deterministic CART.
     pub max_features: Option<usize>,
-    /// PRNG seed.
+    /// Compatibility field; exhaustive CART does not consume randomness.
     pub seed: u64,
 }
 
@@ -882,78 +364,75 @@ impl Default for DecisionTreeRegressor {
 }
 
 impl DecisionTreeRegressor {
-    /// Default MSE tree.
+    /// Returns the documented defaults.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-/// Fitted CART regressor.
+/// Fitted Kanimiso regressor delegating traversal to [`oldwood`].
 #[derive(Clone, Debug)]
 pub struct FittedTreeRegressor {
-    root: RegNode,
+    inner: oldwood::FittedRegressor,
     /// Training feature count.
     pub n_features: usize,
 }
 
 impl Predict for FittedTreeRegressor {
     type Output = Vector;
+
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
-        let mut ctx = FitCtx::with_session(session.child("predict"));
-        predict_shape_guard(&mut ctx, x, self.n_features);
-        ctx.finish(predict_reg_vec(&self.root, x))
+        let ctx = FitCtx::with_session(session.child("predict"));
+        match self.inner.predict(x) {
+            Ok(values) => ctx.finish(Vector::from_iter(values)),
+            Err(error) => fail_oldwood(ctx, "CART regression prediction", error),
+        }
     }
 }
 
 impl Fit for DecisionTreeRegressor {
     type Fitted = FittedTreeRegressor;
+
     fn fit(
         &mut self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
-    ) -> Result<Qualified<FittedTreeRegressor>> {
+    ) -> Result<Qualified<Self::Fitted>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
-        let ys = y.as_slice().to_vec();
-        let idx: Vec<usize> = (0..x.nrows()).collect();
-        let w = unit_weights(x.nrows());
-        let mut rng = Rng::new(self.seed);
-        let root = grow_reg(
-            x,
-            &ys,
-            &idx,
-            &w,
-            0,
-            self.max_depth,
-            self.min_samples_split,
-            self.max_features,
-            false,
-            &mut rng,
-            ctx.policy.near_zero_variance,
+        let model = oldwood::DecisionTreeRegressor::new(
+            oldwood::RegressionCriterion::SquaredError,
+            tree_options(self.max_depth, self.min_samples_split, self.max_features),
         );
-        let fitted = FittedTreeRegressor {
-            root,
-            n_features: x.ncols(),
-        };
-        let pred = predict_reg_vec(&fitted.root, x);
-        diagnose_constant_predictions(&mut ctx, &pred, y);
-        ctx.finish(fitted)
+        match model.fit(x, y.as_slice(), None) {
+            Ok(inner) => finish_with_prediction_diagnostic(
+                ctx,
+                FittedTreeRegressor {
+                    inner,
+                    n_features: x.ncols(),
+                },
+                x,
+                y,
+            ),
+            Err(error) => fail_oldwood(ctx, "CART regression fit", error),
+        }
     }
 }
 
-/// Bootstrap-aggregated Gini trees with per-node feature subsample.
+/// Bootstrap random-forest classifier backed by [`mayoi_no_mori`].
 #[derive(Clone, Debug)]
 pub struct RandomForestClassifier {
     /// Number of trees.
     pub n_estimators: usize,
     /// Maximum tree depth.
     pub max_depth: usize,
-    /// Minimum samples required to attempt a split.
+    /// Minimum rows required to split.
     pub min_samples_split: usize,
-    /// Feature subsample size (`None` ⇒ \(\sqrt{p}\)).
+    /// Node-local feature sample size; `None` means square root.
     pub max_features: Option<usize>,
-    /// PRNG seed.
+    /// Reproducible ChaCha8 seed.
     pub seed: u64,
 }
 
@@ -970,16 +449,17 @@ impl Default for RandomForestClassifier {
 }
 
 impl RandomForestClassifier {
-    /// Default random forest classifier.
+    /// Returns the documented defaults.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-/// Fitted classification forest (random forest or extra-trees).
+/// Fitted random-forest or ExtraTrees classifier.
 #[derive(Clone, Debug)]
 pub struct FittedForestClassifier {
-    trees: Vec<ClassNode>,
+    inner: mayoi_no_mori::FittedForestClassifier,
     /// Sorted unique training labels.
     pub classes: Vec<i64>,
     /// Training feature count.
@@ -988,142 +468,72 @@ pub struct FittedForestClassifier {
 
 impl Predict for FittedForestClassifier {
     type Output = Vector;
+
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
-        let mut ctx = FitCtx::with_session(session.child("predict"));
-        predict_shape_guard(&mut ctx, x, self.n_features);
-        let k = self.classes.len();
-        let mut out = Vector::zeros(x.nrows());
-        for i in 0..x.nrows() {
-            let mut votes = vec![0.0; k];
-            for t in &self.trees {
-                let lab = predict_class_one(t, x, i);
-                if let Some(j) = class_index(lab, &self.classes) {
-                    votes[j] += 1.0;
-                }
-            }
-            out[i] = vote_labels(&self.classes, &votes) as f64;
+        let ctx = FitCtx::with_session(session.child("predict"));
+        match self.inner.predict(x) {
+            Ok(labels) => finish_decoded(ctx, &labels, &self.classes, "forest prediction"),
+            Err(error) => fail_mayoi(ctx, "forest classification prediction", error),
         }
-        ctx.finish(out)
     }
 }
 
-fn grow_forest_class(
-    ctx: &mut FitCtx,
-    x: &Matrix,
-    y: &Vector,
-    n_estimators: usize,
-    max_depth: usize,
-    min_samples_split: usize,
-    max_features: Option<usize>,
-    seed: u64,
-    extra: bool,
-    bootstrap: bool,
-) -> FittedForestClassifier {
-    let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
-    let classes: Vec<i64> = counts.iter().map(|(k, _)| *k).collect();
-    let ylab = labels_of(y);
-    let w = unit_weights(x.nrows());
-    let mut rng = Rng::new(seed);
-    let mut trees = Vec::with_capacity(n_estimators);
-    if classes.is_empty() {
-        return FittedForestClassifier {
-            trees,
-            classes,
-            n_features: x.ncols(),
-        };
-    }
-    for t in 0..n_estimators {
-        let mut trng = Rng::new(rng.next_u64());
-        let idx = if bootstrap && x.nrows() > 0 {
-            bootstrap_idx(&mut trng, x.nrows())
-        } else {
-            (0..x.nrows()).collect()
-        };
-        let root = grow_class(
-            x,
-            &ylab,
-            &classes,
-            &idx,
-            &w,
-            0,
-            max_depth,
-            min_samples_split,
-            max_features,
-            extra,
-            !extra,
-            &mut trng,
-            ctx.policy.near_zero_variance,
-        );
-        ctx.session.step(t as u64, 0.0, None);
-        trees.push(root);
-    }
-    if !trees.is_empty() {
-        ctx.session
-            .converged(format!("{n_estimators} trees grown"), n_estimators as u64);
-    }
-    FittedForestClassifier {
-        trees,
-        classes,
-        n_features: x.ncols(),
+fn classifier_forest_options(model: &RandomForestClassifier, bootstrap: bool) -> ForestOptions {
+    ForestOptions {
+        trees: model.n_estimators,
+        bootstrap,
+        sample_fraction: 1.0,
+        feature_sampling: feature_sampling(model.max_features, FeatureSampling::SquareRoot),
+        seed: model.seed,
+        out_of_bag: false,
+        tree: ensemble_tree_options(model.max_depth, model.min_samples_split),
     }
 }
 
 impl Fit for RandomForestClassifier {
     type Fitted = FittedForestClassifier;
+
     fn fit(
         &mut self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
-    ) -> Result<Qualified<FittedForestClassifier>> {
+    ) -> Result<Qualified<Self::Fitted>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
-        let fitted = grow_forest_class(
-            &mut ctx,
-            x,
-            y,
-            self.n_estimators.max(1),
-            self.max_depth,
-            self.min_samples_split,
-            self.max_features,
-            self.seed,
-            false,
-            true,
+        let (classes, target) = encoded_labels(&mut ctx, y);
+        let model = mayoi_no_mori::RandomForestClassifier::new(
+            classifier_forest_options(self, true),
+            oldwood::ClassificationCriterion::Gini,
         );
-        let pred = match fitted.classes.is_empty() {
-            true => Vector::zeros(x.nrows()),
-            false => {
-                let mut tmp = Vector::zeros(x.nrows());
-                let k = fitted.classes.len();
-                for i in 0..x.nrows() {
-                    let mut votes = vec![0.0; k];
-                    for t in &fitted.trees {
-                        if let Some(j) = class_index(predict_class_one(t, x, i), &fitted.classes) {
-                            votes[j] += 1.0;
-                        }
-                    }
-                    tmp[i] = vote_labels(&fitted.classes, &votes) as f64;
-                }
-                tmp
-            }
-        };
-        diagnose_constant_predictions(&mut ctx, &pred, y);
-        ctx.finish(fitted)
+        match model.fit(x, &target, None) {
+            Ok(inner) => finish_with_prediction_diagnostic(
+                ctx,
+                FittedForestClassifier {
+                    inner,
+                    classes,
+                    n_features: x.ncols(),
+                },
+                x,
+                y,
+            ),
+            Err(error) => fail_mayoi(ctx, "random-forest classification fit", error),
+        }
     }
 }
 
-/// Bootstrap-aggregated MSE trees with per-node feature subsample.
+/// Bootstrap random-forest regressor backed by [`mayoi_no_mori`].
 #[derive(Clone, Debug)]
 pub struct RandomForestRegressor {
     /// Number of trees.
     pub n_estimators: usize,
     /// Maximum tree depth.
     pub max_depth: usize,
-    /// Minimum samples required to attempt a split.
+    /// Minimum rows required to split.
     pub min_samples_split: usize,
-    /// Feature subsample size (`None` ⇒ all features).
+    /// Node-local feature sample size; `None` means all features.
     pub max_features: Option<usize>,
-    /// PRNG seed.
+    /// Reproducible ChaCha8 seed.
     pub seed: u64,
 }
 
@@ -1140,113 +550,84 @@ impl Default for RandomForestRegressor {
 }
 
 impl RandomForestRegressor {
-    /// Default random forest regressor.
+    /// Returns the documented defaults.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-/// Fitted regression forest.
+/// Fitted random-forest or ExtraTrees regressor.
 #[derive(Clone, Debug)]
 pub struct FittedForestRegressor {
-    trees: Vec<RegNode>,
+    inner: mayoi_no_mori::FittedForestRegressor,
     /// Training feature count.
     pub n_features: usize,
 }
 
 impl Predict for FittedForestRegressor {
     type Output = Vector;
+
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
-        let mut ctx = FitCtx::with_session(session.child("predict"));
-        predict_shape_guard(&mut ctx, x, self.n_features);
-        let mut out = Vector::zeros(x.nrows());
-        if self.trees.is_empty() {
-            return ctx.finish(out);
+        let ctx = FitCtx::with_session(session.child("predict"));
+        match self.inner.predict(x) {
+            Ok(values) => ctx.finish(Vector::from_iter(values)),
+            Err(error) => fail_mayoi(ctx, "forest regression prediction", error),
         }
-        let inv = 1.0 / self.trees.len() as f64;
-        for i in 0..x.nrows() {
-            let mut s = 0.0;
-            for t in &self.trees {
-                s += predict_reg_one(t, x, i);
-            }
-            out[i] = s * inv;
-        }
-        ctx.finish(out)
+    }
+}
+
+fn regressor_forest_options(model: &RandomForestRegressor, bootstrap: bool) -> ForestOptions {
+    ForestOptions {
+        trees: model.n_estimators,
+        bootstrap,
+        sample_fraction: 1.0,
+        feature_sampling: feature_sampling(model.max_features, FeatureSampling::All),
+        seed: model.seed,
+        out_of_bag: false,
+        tree: ensemble_tree_options(model.max_depth, model.min_samples_split),
     }
 }
 
 impl Fit for RandomForestRegressor {
     type Fitted = FittedForestRegressor;
+
     fn fit(
         &mut self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
-    ) -> Result<Qualified<FittedForestRegressor>> {
+    ) -> Result<Qualified<Self::Fitted>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
-        let ys = y.as_slice().to_vec();
-        let w = unit_weights(x.nrows());
-        let mut rng = Rng::new(self.seed);
-        let mut trees = Vec::new();
-        let n_est = self.n_estimators.max(1);
-        for t in 0..n_est {
-            let mut trng = Rng::new(rng.next_u64());
-            let idx = if x.nrows() > 0 {
-                bootstrap_idx(&mut trng, x.nrows())
-            } else {
-                Vec::new()
-            };
-            trees.push(grow_reg(
+        let model = mayoi_no_mori::RandomForestRegressor::new(regressor_forest_options(self, true));
+        match model.fit(x, y.as_slice(), None) {
+            Ok(inner) => finish_with_prediction_diagnostic(
+                ctx,
+                FittedForestRegressor {
+                    inner,
+                    n_features: x.ncols(),
+                },
                 x,
-                &ys,
-                &idx,
-                &w,
-                0,
-                self.max_depth,
-                self.min_samples_split,
-                self.max_features,
-                false,
-                &mut trng,
-                ctx.policy.near_zero_variance,
-            ));
-            ctx.session.step(t as u64, 0.0, None);
+                y,
+            ),
+            Err(error) => fail_mayoi(ctx, "random-forest regression fit", error),
         }
-        let fitted = FittedForestRegressor {
-            trees,
-            n_features: x.ncols(),
-        };
-        let pred = {
-            let mut out = Vector::zeros(x.nrows());
-            if !fitted.trees.is_empty() {
-                let inv = 1.0 / fitted.trees.len() as f64;
-                for i in 0..x.nrows() {
-                    let mut s = 0.0;
-                    for t in &fitted.trees {
-                        s += predict_reg_one(t, x, i);
-                    }
-                    out[i] = s * inv;
-                }
-            }
-            out
-        };
-        diagnose_constant_predictions(&mut ctx, &pred, y);
-        ctx.finish(fitted)
     }
 }
 
-/// Extremely randomized Gini trees (random thresholds, full sample).
+/// Extremely randomized classifier using one random threshold per feature.
 #[derive(Clone, Debug)]
 pub struct ExtraTreesClassifier {
     /// Number of trees.
     pub n_estimators: usize,
     /// Maximum tree depth.
     pub max_depth: usize,
-    /// Minimum samples required to attempt a split.
+    /// Minimum rows required to split.
     pub min_samples_split: usize,
-    /// Feature subsample size (`None` ⇒ \(\sqrt{p}\)).
+    /// Node-local feature sample size; `None` means square root.
     pub max_features: Option<usize>,
-    /// PRNG seed.
+    /// Reproducible ChaCha8 seed.
     pub seed: u64,
 }
 
@@ -1263,7 +644,8 @@ impl Default for ExtraTreesClassifier {
 }
 
 impl ExtraTreesClassifier {
-    /// Default extra-trees classifier.
+    /// Returns the documented defaults.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -1271,89 +653,77 @@ impl ExtraTreesClassifier {
 
 impl Fit for ExtraTreesClassifier {
     type Fitted = FittedForestClassifier;
+
     fn fit(
         &mut self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
-    ) -> Result<Qualified<FittedForestClassifier>> {
+    ) -> Result<Qualified<Self::Fitted>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
-        let fitted = grow_forest_class(
-            &mut ctx,
-            x,
-            y,
-            self.n_estimators.max(1),
-            self.max_depth,
-            self.min_samples_split,
-            self.max_features,
-            self.seed,
-            true,
-            false,
-        );
-        let pred = {
-            let mut tmp = Vector::zeros(x.nrows());
-            let k = fitted.classes.len();
-            if k > 0 {
-                for i in 0..x.nrows() {
-                    let mut votes = vec![0.0; k];
-                    for t in &fitted.trees {
-                        if let Some(j) = class_index(predict_class_one(t, x, i), &fitted.classes) {
-                            votes[j] += 1.0;
-                        }
-                    }
-                    tmp[i] = vote_labels(&fitted.classes, &votes) as f64;
-                }
-            }
-            tmp
+        let (classes, target) = encoded_labels(&mut ctx, y);
+        let compatibility = RandomForestClassifier {
+            n_estimators: self.n_estimators,
+            max_depth: self.max_depth,
+            min_samples_split: self.min_samples_split,
+            max_features: self.max_features,
+            seed: self.seed,
         };
-        diagnose_constant_predictions(&mut ctx, &pred, y);
-        ctx.finish(fitted)
+        let model = mayoi_no_mori::ExtraTreesClassifier::new(
+            classifier_forest_options(&compatibility, false),
+            oldwood::ClassificationCriterion::Gini,
+        );
+        match model.fit(x, &target, None) {
+            Ok(inner) => finish_with_prediction_diagnostic(
+                ctx,
+                FittedForestClassifier {
+                    inner,
+                    classes,
+                    n_features: x.ncols(),
+                },
+                x,
+                y,
+            ),
+            Err(error) => fail_mayoi(ctx, "ExtraTrees classification fit", error),
+        }
     }
 }
 
-/// Single extremely randomized Gini tree (sklearn `ExtraTreeClassifier`).
-///
-/// This is [`ExtraTreesClassifier`] with one tree. Feature subsample size is
-/// not identification `p`.
+/// One extremely randomized classification tree.
 #[derive(Clone, Debug)]
 pub struct ExtraTreeClassifier {
     /// Maximum tree depth.
     pub max_depth: usize,
-    /// Minimum samples required to attempt a split.
+    /// Minimum rows required to split.
     pub min_samples_split: usize,
-    /// Feature subsample size (`None` ⇒ \(\sqrt{p}\)).
+    /// Node-local feature sample size; `None` means square root.
     pub max_features: Option<usize>,
-    /// PRNG seed.
+    /// Reproducible ChaCha8 seed.
     pub seed: u64,
 }
 
 impl Default for ExtraTreeClassifier {
     fn default() -> Self {
+        let forest = ExtraTreesClassifier::default();
         Self {
-            max_depth: 8,
-            min_samples_split: 2,
-            max_features: None,
-            seed: 0,
+            max_depth: forest.max_depth,
+            min_samples_split: forest.min_samples_split,
+            max_features: forest.max_features,
+            seed: forest.seed,
         }
-    }
-}
-
-impl ExtraTreeClassifier {
-    /// Default single extra-tree classifier.
-    pub fn new() -> Self {
-        Self::default()
     }
 }
 
 impl Fit for ExtraTreeClassifier {
     type Fitted = FittedForestClassifier;
+
     fn fit(
         &mut self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
-    ) -> Result<Qualified<FittedForestClassifier>> {
+    ) -> Result<Qualified<Self::Fitted>> {
         ExtraTreesClassifier {
             n_estimators: 1,
             max_depth: self.max_depth,
@@ -1365,18 +735,18 @@ impl Fit for ExtraTreeClassifier {
     }
 }
 
-/// Extremely randomized MSE trees (random thresholds, full sample).
+/// Extremely randomized regressor using one random threshold per feature.
 #[derive(Clone, Debug)]
 pub struct ExtraTreesRegressor {
     /// Number of trees.
     pub n_estimators: usize,
     /// Maximum tree depth.
     pub max_depth: usize,
-    /// Minimum samples required to attempt a split.
+    /// Minimum rows required to split.
     pub min_samples_split: usize,
-    /// Feature subsample size (`None` ⇒ all features).
+    /// Node-local feature sample size; `None` means all features.
     pub max_features: Option<usize>,
-    /// PRNG seed.
+    /// Reproducible ChaCha8 seed.
     pub seed: u64,
 }
 
@@ -1393,7 +763,8 @@ impl Default for ExtraTreesRegressor {
 }
 
 impl ExtraTreesRegressor {
-    /// Default extra-trees regressor.
+    /// Returns the documented defaults.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -1401,102 +772,75 @@ impl ExtraTreesRegressor {
 
 impl Fit for ExtraTreesRegressor {
     type Fitted = FittedForestRegressor;
+
     fn fit(
         &mut self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
-    ) -> Result<Qualified<FittedForestRegressor>> {
+    ) -> Result<Qualified<Self::Fitted>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
-        let ys = y.as_slice().to_vec();
-        let w = unit_weights(x.nrows());
-        let mut rng = Rng::new(self.seed);
-        let mut trees = Vec::new();
-        let n_est = self.n_estimators.max(1);
-        let idx: Vec<usize> = (0..x.nrows()).collect();
-        for t in 0..n_est {
-            let mut trng = Rng::new(rng.next_u64());
-            trees.push(grow_reg(
+        let compatibility = RandomForestRegressor {
+            n_estimators: self.n_estimators,
+            max_depth: self.max_depth,
+            min_samples_split: self.min_samples_split,
+            max_features: self.max_features,
+            seed: self.seed,
+        };
+        let model = mayoi_no_mori::ExtraTreesRegressor::new(regressor_forest_options(
+            &compatibility,
+            false,
+        ));
+        match model.fit(x, y.as_slice(), None) {
+            Ok(inner) => finish_with_prediction_diagnostic(
+                ctx,
+                FittedForestRegressor {
+                    inner,
+                    n_features: x.ncols(),
+                },
                 x,
-                &ys,
-                &idx,
-                &w,
-                0,
-                self.max_depth,
-                self.min_samples_split,
-                self.max_features,
-                true,
-                &mut trng,
-                ctx.policy.near_zero_variance,
-            ));
-            ctx.session.step(t as u64, 0.0, None);
+                y,
+            ),
+            Err(error) => fail_mayoi(ctx, "ExtraTrees regression fit", error),
         }
-        let fitted = FittedForestRegressor {
-            trees,
-            n_features: x.ncols(),
-        };
-        let pred = {
-            let mut out = Vector::zeros(x.nrows());
-            if !fitted.trees.is_empty() {
-                let inv = 1.0 / fitted.trees.len() as f64;
-                for i in 0..x.nrows() {
-                    let mut s = 0.0;
-                    for t in &fitted.trees {
-                        s += predict_reg_one(t, x, i);
-                    }
-                    out[i] = s * inv;
-                }
-            }
-            out
-        };
-        diagnose_constant_predictions(&mut ctx, &pred, y);
-        ctx.finish(fitted)
     }
 }
 
-/// Single extremely randomized MSE tree (sklearn `ExtraTreeRegressor`).
-///
-/// This is [`ExtraTreesRegressor`] with one tree. Feature subsample size is
-/// not identification `p`.
+/// One extremely randomized regression tree.
 #[derive(Clone, Debug)]
 pub struct ExtraTreeRegressor {
     /// Maximum tree depth.
     pub max_depth: usize,
-    /// Minimum samples required to attempt a split.
+    /// Minimum rows required to split.
     pub min_samples_split: usize,
-    /// Feature subsample size (`None` ⇒ all features).
+    /// Node-local feature sample size; `None` means all features.
     pub max_features: Option<usize>,
-    /// PRNG seed.
+    /// Reproducible ChaCha8 seed.
     pub seed: u64,
 }
 
 impl Default for ExtraTreeRegressor {
     fn default() -> Self {
+        let forest = ExtraTreesRegressor::default();
         Self {
-            max_depth: 8,
-            min_samples_split: 2,
-            max_features: None,
-            seed: 0,
+            max_depth: forest.max_depth,
+            min_samples_split: forest.min_samples_split,
+            max_features: forest.max_features,
+            seed: forest.seed,
         }
-    }
-}
-
-impl ExtraTreeRegressor {
-    /// Default single extra-tree regressor.
-    pub fn new() -> Self {
-        Self::default()
     }
 }
 
 impl Fit for ExtraTreeRegressor {
     type Fitted = FittedForestRegressor;
+
     fn fit(
         &mut self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
-    ) -> Result<Qualified<FittedForestRegressor>> {
+    ) -> Result<Qualified<Self::Fitted>> {
         ExtraTreesRegressor {
             n_estimators: 1,
             max_depth: self.max_depth,
@@ -1508,18 +852,18 @@ impl Fit for ExtraTreeRegressor {
     }
 }
 
-/// Friedman gradient boosting for squared error.
+/// Squared-error gradient-boosted regression trees.
 #[derive(Clone, Debug)]
 pub struct GradientBoostingRegressor {
-    /// Number of sequential trees.
+    /// Number of additive stages.
     pub n_estimators: usize,
-    /// Shrinkage \(\nu\).
+    /// Positive shrinkage.
     pub learning_rate: f64,
-    /// Maximum tree depth.
+    /// Maximum CART depth.
     pub max_depth: usize,
-    /// Minimum samples required to attempt a split.
+    /// Minimum rows required to split.
     pub min_samples_split: usize,
-    /// PRNG seed.
+    /// Reproducible ChaCha8 seed.
     pub seed: u64,
 }
 
@@ -1536,119 +880,103 @@ impl Default for GradientBoostingRegressor {
 }
 
 impl GradientBoostingRegressor {
-    /// Default squared-error gradient booster.
+    /// Returns the documented defaults.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-/// Fitted squared-error gradient booster.
+/// Fitted first-order gradient-boosting regressor.
 #[derive(Clone, Debug)]
 pub struct FittedGbr {
-    /// Initial constant (training mean).
+    inner: mayoi_no_mori::FittedGradientBoostingRegressor,
+    /// Weighted training-target mean.
     pub intercept: f64,
-    trees: Vec<RegNode>,
     /// Shrinkage used at fit time.
     pub learning_rate: f64,
     /// Training feature count.
     pub n_features: usize,
 }
 
-impl FittedGbr {
-    fn predict_vec(&self, x: &Matrix) -> Vector {
-        let mut out = Vector::filled(x.nrows(), self.intercept);
-        for t in &self.trees {
-            for i in 0..x.nrows() {
-                out[i] += self.learning_rate * predict_reg_one(t, x, i);
-            }
+impl Predict for FittedGbr {
+    type Output = Vector;
+
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("predict"));
+        match self.inner.predict(x) {
+            Ok(values) => ctx.finish(Vector::from_iter(values)),
+            Err(error) => fail_mayoi(ctx, "gradient-boosting regression prediction", error),
         }
-        out
     }
 }
 
-impl Predict for FittedGbr {
-    type Output = Vector;
-    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
-        let mut ctx = FitCtx::with_session(session.child("predict"));
-        predict_shape_guard(&mut ctx, x, self.n_features);
-        ctx.finish(self.predict_vec(x))
+fn boosting_options(
+    iterations: usize,
+    learning_rate: f64,
+    max_depth: usize,
+    min_samples_split: usize,
+    seed: u64,
+) -> BoostingOptions {
+    BoostingOptions {
+        iterations,
+        learning_rate,
+        sample_fraction: 1.0,
+        seed,
+        tree: ensemble_tree_options(max_depth, min_samples_split),
     }
 }
 
 impl Fit for GradientBoostingRegressor {
     type Fitted = FittedGbr;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGbr>> {
+
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<Self::Fitted>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
-        let intercept = y.mean();
-        let mut residual: Vec<f64> = y.as_slice().iter().map(|v| v - intercept).collect();
-        let w = unit_weights(x.nrows());
-        let idx: Vec<usize> = (0..x.nrows()).collect();
-        let mut rng = Rng::new(self.seed);
-        let mut trees = Vec::new();
-        let nu = self.learning_rate;
-        if nu <= 0.0 || !nu.is_finite() {
-            ctx.push(
-                Issue::builder(IssueCode::InvalidWeight)
-                    .message(format!(
-                        "learning_rate={nu} is not a positive finite number"
-                    ))
-                    .build(),
-            );
-        }
-        for m in 0..self.n_estimators.max(1) {
-            let mut trng = Rng::new(rng.next_u64());
-            let tree = grow_reg(
-                x,
-                &residual,
-                &idx,
-                &w,
-                0,
-                self.max_depth,
-                self.min_samples_split,
-                None,
-                false,
-                &mut trng,
-                ctx.policy.near_zero_variance,
-            );
-            let mut sse = 0.0;
-            for i in 0..x.nrows() {
-                let step = nu * predict_reg_one(&tree, x, i);
-                residual[i] -= step;
-                sse += residual[i] * residual[i];
+        let model = mayoi_no_mori::GradientBoostingRegressor::new(boosting_options(
+            self.n_estimators,
+            self.learning_rate,
+            self.max_depth,
+            self.min_samples_split,
+            self.seed,
+        ));
+        match model.fit(x, y.as_slice(), None) {
+            Ok(inner) => {
+                let intercept = inner.base_value();
+                finish_with_prediction_diagnostic(
+                    ctx,
+                    FittedGbr {
+                        inner,
+                        intercept,
+                        learning_rate: self.learning_rate,
+                        n_features: x.ncols(),
+                    },
+                    x,
+                    y,
+                )
             }
-            ctx.session.step(m as u64, sse, None);
-            trees.push(tree);
-            if sse <= ctx.policy.near_zero_variance {
-                ctx.session
-                    .converged("boosting residuals vanished", m as u64);
-                break;
-            }
+            Err(error) => fail_mayoi(ctx, "gradient-boosting regression fit", error),
         }
-        let fitted = FittedGbr {
-            intercept,
-            trees,
-            learning_rate: nu,
-            n_features: x.ncols(),
-        };
-        let pred = fitted.predict_vec(x);
-        diagnose_constant_predictions(&mut ctx, &pred, y);
-        ctx.finish(fitted)
     }
 }
 
-/// Friedman gradient boosting for binomial / multinomial log-loss.
+/// Multiclass softmax gradient-boosted classifier.
 #[derive(Clone, Debug)]
 pub struct GradientBoostingClassifier {
-    /// Number of sequential stages.
+    /// Number of additive stages.
     pub n_estimators: usize,
-    /// Shrinkage \(\nu\).
+    /// Positive shrinkage.
     pub learning_rate: f64,
-    /// Maximum tree depth.
+    /// Maximum CART depth.
     pub max_depth: usize,
-    /// Minimum samples required to attempt a split.
+    /// Minimum rows required to split.
     pub min_samples_split: usize,
-    /// PRNG seed.
+    /// Reproducible ChaCha8 seed.
     pub seed: u64,
 }
 
@@ -1665,255 +993,116 @@ impl Default for GradientBoostingClassifier {
 }
 
 impl GradientBoostingClassifier {
-    /// Default log-loss gradient booster.
+    /// Returns the documented defaults.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-/// Fitted log-loss gradient booster.
+/// Fitted multiclass gradient-boosting classifier.
 #[derive(Clone, Debug)]
 pub struct FittedGbc {
+    inner: mayoi_no_mori::FittedGradientBoostingClassifier,
     /// Sorted unique training labels.
     pub classes: Vec<i64>,
-    /// Per-class initial scores (log-odds / zero-mean log-prior).
+    /// Per-class log-prior scores.
     pub intercept: Vec<f64>,
-    /// Stages; for binary, each stage has one tree (positive class).
-    trees: Vec<Vec<RegNode>>,
     /// Shrinkage used at fit time.
     pub learning_rate: f64,
     /// Training feature count.
     pub n_features: usize,
 }
 
-fn sigmoid(z: f64) -> f64 {
-    if z >= 0.0 {
-        let e = (-z).exp();
-        1.0 / (1.0 + e)
-    } else {
-        let e = z.exp();
-        e / (1.0 + e)
-    }
-}
-
-fn softmax_row(scores: &[f64]) -> Vec<f64> {
-    let m = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let mut e: Vec<f64> = scores.iter().map(|s| (s - m).exp()).collect();
-    let z: f64 = e.iter().sum::<f64>().max(1e-15);
-    for v in &mut e {
-        *v /= z;
-    }
-    e
-}
-
-impl FittedGbc {
-    fn scores_row(&self, x: &Matrix, i: usize) -> Vec<f64> {
-        let k = self.classes.len();
-        let mut f = self.intercept.clone();
-        if f.len() != k {
-            f.resize(k, 0.0);
-        }
-        let binary = k <= 2;
-        for stage in &self.trees {
-            if binary {
-                if let Some(t) = stage.first() {
-                    let step = self.learning_rate * predict_reg_one(t, x, i);
-                    if k == 2 {
-                        f[1] += step;
-                    } else if k == 1 {
-                        f[0] += step;
-                    }
-                }
-            } else {
-                for (c, t) in stage.iter().enumerate().take(k) {
-                    f[c] += self.learning_rate * predict_reg_one(t, x, i);
-                }
-            }
-        }
-        f
-    }
-
-    fn predict_vec(&self, x: &Matrix) -> Vector {
-        let k = self.classes.len();
-        Vector::from_iter((0..x.nrows()).map(|i| {
-            if k == 0 {
-                return 0.0;
-            }
-            if k == 2 {
-                let f = self.scores_row(x, i);
-                let p =
-                    sigmoid(f.get(1).copied().unwrap_or(0.0) - f.first().copied().unwrap_or(0.0));
-                if p >= 0.5 {
-                    self.classes[1] as f64
-                } else {
-                    self.classes[0] as f64
-                }
-            } else {
-                let f = self.scores_row(x, i);
-                let mut best = 0usize;
-                for c in 1..f.len() {
-                    if f[c] > f[best] {
-                        best = c;
-                    }
-                }
-                self.classes[best] as f64
-            }
-        }))
-    }
-}
-
 impl Predict for FittedGbc {
     type Output = Vector;
+
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
-        let mut ctx = FitCtx::with_session(session.child("predict"));
-        predict_shape_guard(&mut ctx, x, self.n_features);
-        ctx.finish(self.predict_vec(x))
+        let ctx = FitCtx::with_session(session.child("predict"));
+        match self.inner.predict(x) {
+            Ok(labels) => finish_decoded(
+                ctx,
+                &labels,
+                &self.classes,
+                "gradient-boosting classification prediction",
+            ),
+            Err(error) => fail_mayoi(ctx, "gradient-boosting classification prediction", error),
+        }
     }
 }
 
 impl Fit for GradientBoostingClassifier {
     type Fitted = FittedGbc;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGbc>> {
+
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<Self::Fitted>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
-        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
-        let classes: Vec<i64> = counts.iter().map(|(k, _)| *k).collect();
-        let ylab = labels_of(y);
-        let n = x.nrows();
-        let k = classes.len();
-        let w = unit_weights(n);
-        let idx: Vec<usize> = (0..n).collect();
-        let mut rng = Rng::new(self.seed);
-        if k < 2 {
-            return ctx.finish(FittedGbc {
-                classes,
-                intercept: vec![0.0],
-                trees: Vec::new(),
-                learning_rate: self.learning_rate,
-                n_features: x.ncols(),
-            });
+        let (classes, target) = encoded_labels(&mut ctx, y);
+        let counts = classes
+            .iter()
+            .map(|class| {
+                y.as_slice()
+                    .iter()
+                    .filter(|value| value.is_finite() && value.round() as i64 == *class)
+                    .count()
+            })
+            .collect::<Vec<_>>();
+        let total = counts.iter().sum::<usize>().max(1) as f64;
+        let intercept = counts
+            .iter()
+            .map(|&count| ((count.max(1) as f64) / total).ln())
+            .collect();
+        let model = mayoi_no_mori::GradientBoostingClassifier::new(boosting_options(
+            self.n_estimators,
+            self.learning_rate,
+            self.max_depth,
+            self.min_samples_split,
+            self.seed,
+        ));
+        match model.fit(x, &target, None) {
+            Ok(inner) => finish_with_prediction_diagnostic(
+                ctx,
+                FittedGbc {
+                    inner,
+                    classes,
+                    intercept,
+                    learning_rate: self.learning_rate,
+                    n_features: x.ncols(),
+                },
+                x,
+                y,
+            ),
+            Err(error) => fail_mayoi(ctx, "gradient-boosting classification fit", error),
         }
-        let ntot = counts.iter().map(|(_, c)| *c as f64).sum::<f64>().max(1.0);
-        let mut intercept = vec![0.0; k];
-        if k == 2 {
-            let p1 = counts[1].1 as f64 / ntot;
-            let p1 = p1.clamp(1e-15, 1.0 - 1e-15);
-            intercept[1] = (p1 / (1.0 - p1)).ln();
-        }
-        let mut scores = vec![vec![0.0; k]; n];
-        for i in 0..n {
-            scores[i].clone_from(&intercept);
-        }
-        let mut trees: Vec<Vec<RegNode>> = Vec::new();
-        let nu = self.learning_rate;
-        for m in 0..self.n_estimators.max(1) {
-            let mut stage = Vec::new();
-            if k == 2 {
-                let mut r = vec![0.0; n];
-                let mut p = vec![0.0; n];
-                let mut loss = 0.0;
-                for i in 0..n {
-                    let logit = scores[i][1] - scores[i][0];
-                    p[i] = sigmoid(logit);
-                    let yi = if ylab[i] == classes[1] { 1.0 } else { 0.0 };
-                    r[i] = yi - p[i];
-                    let pi = p[i].clamp(1e-15, 1.0 - 1e-15);
-                    loss -= yi * pi.ln() + (1.0 - yi) * (1.0 - pi).ln();
-                }
-                let mut trng = Rng::new(rng.next_u64());
-                let mut tree = grow_reg(
-                    x,
-                    &r,
-                    &idx,
-                    &w,
-                    0,
-                    self.max_depth,
-                    self.min_samples_split,
-                    None,
-                    false,
-                    &mut trng,
-                    ctx.policy.near_zero_variance,
-                );
-                rewrite_logistic_leaves(&mut tree, x, &r, &p, &idx);
-                for i in 0..n {
-                    scores[i][1] += nu * predict_reg_one(&tree, x, i);
-                }
-                ctx.session.step(m as u64, loss, None);
-                stage.push(tree);
-            } else {
-                let mut loss = 0.0;
-                let mut probs = vec![vec![0.0; k]; n];
-                for i in 0..n {
-                    probs[i] = softmax_row(&scores[i]);
-                    if let Some(c) = class_index(ylab[i], &classes) {
-                        loss -= probs[i][c].max(1e-15).ln();
-                    }
-                }
-                for c in 0..k {
-                    let mut r = vec![0.0; n];
-                    for i in 0..n {
-                        let yi = if ylab[i] == classes[c] { 1.0 } else { 0.0 };
-                        r[i] = yi - probs[i][c];
-                    }
-                    let mut trng = Rng::new(rng.next_u64());
-                    let tree = grow_reg(
-                        x,
-                        &r,
-                        &idx,
-                        &w,
-                        0,
-                        self.max_depth,
-                        self.min_samples_split,
-                        None,
-                        false,
-                        &mut trng,
-                        ctx.policy.near_zero_variance,
-                    );
-                    for i in 0..n {
-                        scores[i][c] += nu * predict_reg_one(&tree, x, i);
-                    }
-                    stage.push(tree);
-                }
-                ctx.session.step(m as u64, loss, None);
-            }
-            trees.push(stage);
-        }
-        ctx.session
-            .converged("finished log-loss boosting stages", trees.len() as u64);
-        let fitted = FittedGbc {
-            classes,
-            intercept,
-            trees,
-            learning_rate: nu,
-            n_features: x.ncols(),
-        };
-        let pred = fitted.predict_vec(x);
-        diagnose_constant_predictions(&mut ctx, &pred, y);
-        ctx.finish(fitted)
     }
 }
 
 /// AdaBoost label-update scheme.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdaBoostAlgorithm {
-    /// Discrete SAMME (Zhu et al.).
+    /// Discrete multiclass SAMME.
     Samme,
-    /// Real SAMME.R using class probabilities.
+    /// Unsupported legacy selector; the former implementation was not conformant.
     SammeR,
 }
 
-/// SAMME / SAMME.R AdaBoost classifier.
+/// Discrete SAMME AdaBoost classifier.
 #[derive(Clone, Debug)]
 pub struct AdaBoostClassifier {
-    /// Number of weak learners.
+    /// Maximum number of weak learners.
     pub n_estimators: usize,
-    /// Shrinkage on the additive model.
+    /// Positive shrinkage.
     pub learning_rate: f64,
-    /// Weak-learner depth (SAMME needs ≥ 2 for XOR-like problems).
+    /// Maximum weak-tree depth.
     pub max_depth: usize,
-    /// `SAMME` or `SAMME.R`.
+    /// Only [`AdaBoostAlgorithm::Samme`] is accepted.
     pub algorithm: AdaBoostAlgorithm,
-    /// PRNG seed.
+    /// Compatibility field; SAMME uses deterministic weighted CART.
     pub seed: u64,
 }
 
@@ -1922,29 +1111,30 @@ impl Default for AdaBoostClassifier {
         Self {
             n_estimators: 30,
             learning_rate: 1.0,
-            max_depth: 2,
-            algorithm: AdaBoostAlgorithm::SammeR,
+            max_depth: 1,
+            algorithm: AdaBoostAlgorithm::Samme,
             seed: 0,
         }
     }
 }
 
 impl AdaBoostClassifier {
-    /// Default SAMME.R AdaBoost.
+    /// Returns the verified discrete-SAMME defaults.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-/// Fitted AdaBoost model.
+/// Fitted discrete-SAMME classifier.
 #[derive(Clone, Debug)]
 pub struct FittedAdaBoost {
-    trees: Vec<ClassNode>,
-    /// SAMME weights (`α_m`); empty when using SAMME.R.
+    inner: mayoi_no_mori::FittedAdaBoostClassifier,
+    /// Finite SAMME stage weights.
     pub alphas: Vec<f64>,
     /// Algorithm used at fit time.
     pub algorithm: AdaBoostAlgorithm,
-    /// Shrinkage.
+    /// Shrinkage used at fit time.
     pub learning_rate: f64,
     /// Sorted unique training labels.
     pub classes: Vec<i64>,
@@ -1952,193 +1142,77 @@ pub struct FittedAdaBoost {
     pub n_features: usize,
 }
 
-impl FittedAdaBoost {
-    fn predict_vec(&self, x: &Matrix) -> Vector {
-        let k = self.classes.len();
-        Vector::from_iter((0..x.nrows()).map(|i| {
-            if k == 0 {
-                return 0.0;
-            }
-            let mut scores = vec![0.0; k];
-            match self.algorithm {
-                AdaBoostAlgorithm::Samme => {
-                    for (t, &alpha) in self.trees.iter().zip(&self.alphas) {
-                        let lab = predict_class_one(t, x, i);
-                        if let Some(j) = class_index(lab, &self.classes) {
-                            scores[j] += alpha;
-                        }
-                    }
-                }
-                AdaBoostAlgorithm::SammeR => {
-                    let km1 = (k as f64 - 1.0).max(1.0);
-                    for t in &self.trees {
-                        let p = predict_class_proba(t, x, i, k);
-                        let mut lp: Vec<f64> = p.iter().map(|v| v.max(1e-15).ln()).collect();
-                        let mean = lp.iter().sum::<f64>() / k as f64;
-                        for c in 0..k {
-                            lp[c] -= mean;
-                            scores[c] += self.learning_rate * km1 * lp[c];
-                        }
-                    }
-                }
-            }
-            vote_labels(&self.classes, &scores) as f64
-        }))
-    }
-}
-
 impl Predict for FittedAdaBoost {
     type Output = Vector;
+
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
-        let mut ctx = FitCtx::with_session(session.child("predict"));
-        predict_shape_guard(&mut ctx, x, self.n_features);
-        ctx.finish(self.predict_vec(x))
+        let ctx = FitCtx::with_session(session.child("predict"));
+        match self.inner.predict(x) {
+            Ok(labels) => finish_decoded(ctx, &labels, &self.classes, "SAMME prediction"),
+            Err(error) => fail_mayoi(ctx, "SAMME prediction", error),
+        }
     }
 }
 
 impl Fit for AdaBoostClassifier {
     type Fitted = FittedAdaBoost;
+
     fn fit(
         &mut self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
-    ) -> Result<Qualified<FittedAdaBoost>> {
+    ) -> Result<Qualified<Self::Fitted>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
-        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
-        let classes: Vec<i64> = counts.iter().map(|(k, _)| *k).collect();
-        let ylab = labels_of(y);
-        let n = x.nrows();
-        let k = classes.len();
-        if k < 2 || n == 0 {
-            return ctx.finish(FittedAdaBoost {
-                trees: Vec::new(),
-                alphas: Vec::new(),
-                algorithm: self.algorithm,
+        if self.algorithm == AdaBoostAlgorithm::SammeR {
+            return fail(
+                ctx,
+                IssueCode::InvalidParameter,
+                "SAMME.R was removed because the legacy update was not specification-conformant; use discrete SAMME",
+            );
+        }
+        let (classes, target) = encoded_labels(&mut ctx, y);
+        let model = mayoi_no_mori::AdaBoostClassifier::new(
+            SammeOptions {
+                estimators: self.n_estimators,
                 learning_rate: self.learning_rate,
-                classes,
-                n_features: x.ncols(),
-            });
-        }
-        let mut w = vec![1.0 / n as f64; n];
-        let idx: Vec<usize> = (0..n).collect();
-        let mut rng = Rng::new(self.seed);
-        let mut trees = Vec::new();
-        let mut alphas = Vec::new();
-        let k_f = k as f64;
-        for m in 0..self.n_estimators.max(1) {
-            let mut trng = Rng::new(rng.next_u64());
-            let tree = grow_class(
-                x,
-                &ylab,
-                &classes,
-                &idx,
-                &w,
-                0,
-                self.max_depth,
-                2,
-                None,
-                false,
-                false,
-                &mut trng,
-                ctx.policy.near_zero_variance,
-            );
-            match self.algorithm {
-                AdaBoostAlgorithm::Samme => {
-                    let mut err = 0.0;
-                    let mut wsum = 0.0;
-                    for i in 0..n {
-                        wsum += w[i];
-                        if predict_class_one(&tree, x, i) != ylab[i] {
-                            err += w[i];
-                        }
-                    }
-                    err = if wsum > 0.0 { err / wsum } else { 1.0 };
-                    if err >= 1.0 - 1.0 / k_f {
-                        ctx.push(
-                            Issue::builder(IssueCode::MeaninglessFit)
-                                .message(format!("SAMME weak learner {m} is not better than random (err={err:.4})"))
-                                .meaninglessness(Meaninglessness::vacuous(
-                                    "AdaBoost SAMME stage",
-                                    "the weighted error is at or worse than chance; α is undefined or non-positive",
-                                    "use deeper trees or a linearly separable sample",
-                                ))
-                                .build(),
-                        );
-                        break;
-                    }
-                    let alpha = self.learning_rate
-                        * (((1.0 - err) / err.max(1e-15)).ln() + (k_f - 1.0).ln());
-                    for i in 0..n {
-                        if predict_class_one(&tree, x, i) != ylab[i] {
-                            w[i] *= alpha.exp();
-                        }
-                    }
-                    let z: f64 = w.iter().sum::<f64>().max(1e-15);
-                    for wi in &mut w {
-                        *wi /= z;
-                    }
-                    ctx.session.step(m as u64, err, Some(alpha));
-                    alphas.push(alpha);
-                    trees.push(tree);
-                }
-                AdaBoostAlgorithm::SammeR => {
-                    let factor = (k_f - 1.0) / k_f;
-                    let mut loss = 0.0;
-                    for i in 0..n {
-                        let p = predict_class_proba(&tree, x, i, k);
-                        if let Some(c) = class_index(ylab[i], &classes) {
-                            let lp = p[c].max(1e-15).ln();
-                            loss -= lp;
-                            w[i] *= (-self.learning_rate * factor * lp).exp();
-                        }
-                    }
-                    let z: f64 = w.iter().sum::<f64>().max(1e-15);
-                    for wi in &mut w {
-                        *wi /= z;
-                    }
-                    ctx.session.step(m as u64, loss, None);
-                    trees.push(tree);
-                }
+                tree: tree_options(self.max_depth, 2, None),
+            },
+            oldwood::ClassificationCriterion::Gini,
+        );
+        match model.fit(x, &target, None) {
+            Ok(inner) => {
+                let alphas = inner.estimator_weights().to_vec();
+                finish_with_prediction_diagnostic(
+                    ctx,
+                    FittedAdaBoost {
+                        inner,
+                        alphas,
+                        algorithm: AdaBoostAlgorithm::Samme,
+                        learning_rate: self.learning_rate,
+                        classes,
+                        n_features: x.ncols(),
+                    },
+                    x,
+                    y,
+                )
             }
+            Err(error) => fail_mayoi(ctx, "SAMME fit", error),
         }
-        if trees.is_empty() && k >= 2 {
-            ctx.push(
-                Issue::builder(IssueCode::UnidentifiedModel)
-                    .message("AdaBoost produced no usable weak learners")
-                    .build(),
-            );
-        } else {
-            ctx.session.converged(
-                format!("{} AdaBoost stages", trees.len()),
-                trees.len() as u64,
-            );
-        }
-        let fitted = FittedAdaBoost {
-            trees,
-            alphas,
-            algorithm: self.algorithm,
-            learning_rate: self.learning_rate,
-            classes,
-            n_features: x.ncols(),
-        };
-        let pred = fitted.predict_vec(x);
-        diagnose_constant_predictions(&mut ctx, &pred, y);
-        ctx.finish(fitted)
     }
 }
 
-/// AdaBoost.R2 regressor (Drucker 1997).
+/// AdaBoost.R2 regressor.
 #[derive(Clone, Debug)]
 pub struct AdaBoostRegressor {
-    /// Number of weak learners.
+    /// Maximum number of weak learners.
     pub n_estimators: usize,
-    /// Shrinkage on \(\ln(1/\beta)\).
+    /// Positive shrinkage.
     pub learning_rate: f64,
-    /// Weak-learner depth.
+    /// Maximum weak-tree depth.
     pub max_depth: usize,
-    /// PRNG seed.
+    /// Reproducible ChaCha8 seed for weighted bootstrap sampling.
     pub seed: u64,
 }
 
@@ -2154,7 +1228,8 @@ impl Default for AdaBoostRegressor {
 }
 
 impl AdaBoostRegressor {
-    /// Default AdaBoost.R2.
+    /// Returns the documented defaults.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -2163,171 +1238,67 @@ impl AdaBoostRegressor {
 /// Fitted AdaBoost.R2 model.
 #[derive(Clone, Debug)]
 pub struct FittedAdaBoostRegressor {
-    trees: Vec<RegNode>,
-    /// Stage weights \(\ln(1/\beta_m)\).
+    inner: mayoi_no_mori::FittedAdaBoostRegressor,
+    /// Positive weighted-median stage weights.
     pub alphas: Vec<f64>,
     /// Training feature count.
     pub n_features: usize,
 }
 
-impl FittedAdaBoostRegressor {
-    fn predict_vec(&self, x: &Matrix) -> Vector {
-        Vector::from_iter((0..x.nrows()).map(|i| {
-            let mut pairs: Vec<(f64, f64)> = self
-                .trees
-                .iter()
-                .zip(&self.alphas)
-                .map(|(t, a)| (predict_reg_one(t, x, i), *a))
-                .collect();
-            if pairs.is_empty() {
-                return 0.0;
-            }
-            pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            let tot: f64 = pairs.iter().map(|(_, a)| *a).sum();
-            let mut acc = 0.0;
-            for (v, a) in pairs {
-                acc += a;
-                if acc >= 0.5 * tot {
-                    return v;
-                }
-            }
-            0.0
-        }))
-    }
-}
-
 impl Predict for FittedAdaBoostRegressor {
     type Output = Vector;
+
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
-        let mut ctx = FitCtx::with_session(session.child("predict"));
-        predict_shape_guard(&mut ctx, x, self.n_features);
-        ctx.finish(self.predict_vec(x))
+        let ctx = FitCtx::with_session(session.child("predict"));
+        match self.inner.predict(x) {
+            Ok(values) => ctx.finish(Vector::from_iter(values)),
+            Err(error) => fail_mayoi(ctx, "AdaBoost.R2 prediction", error),
+        }
     }
 }
 
 impl Fit for AdaBoostRegressor {
     type Fitted = FittedAdaBoostRegressor;
+
     fn fit(
         &mut self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
-    ) -> Result<Qualified<FittedAdaBoostRegressor>> {
+    ) -> Result<Qualified<Self::Fitted>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
-        let n = x.nrows();
-        if n == 0 || ctx.report.contains(IssueCode::ConstantTarget) {
-            return ctx.finish(FittedAdaBoostRegressor {
-                trees: Vec::new(),
-                alphas: Vec::new(),
-                n_features: x.ncols(),
-            });
+        let model = mayoi_no_mori::AdaBoostRegressor::new(AdaBoostR2Options {
+            estimators: self.n_estimators,
+            learning_rate: self.learning_rate,
+            seed: self.seed,
+            tree: tree_options(self.max_depth, 2, None),
+        });
+        match model.fit(x, y.as_slice(), None) {
+            Ok(inner) => {
+                let alphas = inner.estimator_weights().to_vec();
+                finish_with_prediction_diagnostic(
+                    ctx,
+                    FittedAdaBoostRegressor {
+                        inner,
+                        alphas,
+                        n_features: x.ncols(),
+                    },
+                    x,
+                    y,
+                )
+            }
+            Err(error) => fail_mayoi(ctx, "AdaBoost.R2 fit", error),
         }
-        let ys = y.as_slice().to_vec();
-        let mut w = vec![1.0 / n as f64; n];
-        let mut rng = Rng::new(self.seed);
-        let mut trees = Vec::new();
-        let mut alphas = Vec::new();
-        for m in 0..self.n_estimators.max(1) {
-            let mut trng = Rng::new(rng.next_u64());
-            let sample = weighted_bootstrap(&w, &mut trng);
-            let unit = vec![1.0; n];
-            let tree = grow_reg(
-                x,
-                &ys,
-                &sample,
-                &unit,
-                0,
-                self.max_depth,
-                2,
-                None,
-                false,
-                &mut trng,
-                ctx.policy.near_zero_variance,
-            );
-            let pred = predict_reg_vec(&tree, x);
-            let mut max_e = 0.0;
-            let mut err = vec![0.0; n];
-            for i in 0..n {
-                err[i] = (ys[i] - pred[i]).abs();
-                if err[i] > max_e {
-                    max_e = err[i];
-                }
-            }
-            if max_e <= ctx.policy.near_zero_variance {
-                ctx.session.step(m as u64, 0.0, Some(f64::INFINITY));
-                trees.push(tree);
-                alphas.push(1.0);
-                break;
-            }
-            let mut lbar = 0.0;
-            for i in 0..n {
-                lbar += w[i] * (err[i] / max_e);
-            }
-            if lbar >= 0.5 {
-                if trees.is_empty() {
-                    ctx.push(
-                        Issue::builder(IssueCode::MeaninglessFit)
-                            .message(format!(
-                                "AdaBoost.R2 stage {m} has weighted loss {lbar:.4} ≥ 1/2; β is undefined"
-                            ))
-                            .meaninglessness(Meaninglessness::vacuous(
-                                "AdaBoost.R2 stage weight",
-                                "the weak learner is not better than the median-absolute-error null",
-                                "use deeper trees or a smoother target",
-                            ))
-                            .build(),
-                    );
-                } else {
-                    ctx.push(
-                        Issue::builder(IssueCode::DidNotConverge)
-                            .message(format!(
-                                "AdaBoost.R2 stopped at stage {m}: weighted loss {lbar:.4} ≥ 1/2"
-                            ))
-                            .build(),
-                    );
-                }
-                break;
-            }
-            let beta = (lbar / (1.0 - lbar).max(1e-15)).max(1e-12);
-            let alpha = self.learning_rate * (1.0 / beta).ln();
-            for i in 0..n {
-                w[i] *= beta.powf(1.0 - err[i] / max_e);
-            }
-            let z: f64 = w.iter().sum::<f64>().max(1e-15);
-            for wi in &mut w {
-                *wi /= z;
-            }
-            ctx.session.step(m as u64, lbar, Some(alpha));
-            trees.push(tree);
-            alphas.push(alpha);
-        }
-        if trees.is_empty() {
-            ctx.push(
-                Issue::builder(IssueCode::UnidentifiedModel)
-                    .message("AdaBoost.R2 produced no usable weak learners")
-                    .build(),
-            );
-        }
-        let fitted = FittedAdaBoostRegressor {
-            trees,
-            alphas,
-            n_features: x.ncols(),
-        };
-        let pred = fitted.predict_vec(x);
-        diagnose_constant_predictions(&mut ctx, &pred, y);
-        ctx.finish(fitted)
     }
 }
 
-/// Isolation Forest (Liu, Ting, Zhou): random-split path-length anomaly scores.
-///
-/// The later `anomaly` module reuses [`FittedIsolationForest`] scores.
+/// Isolation Forest anomaly scorer backed by [`mayoi_no_mori`].
 #[derive(Clone, Debug)]
 pub struct IsolationForest {
     /// Number of isolation trees.
     pub n_trees: usize,
-    /// PRNG seed.
+    /// Reproducible ChaCha8 seed.
     pub seed: u64,
 }
 
@@ -2341,526 +1312,207 @@ impl Default for IsolationForest {
 }
 
 impl IsolationForest {
-    /// Isolation forest with `n_trees` trees.
-    pub fn new(n_trees: usize) -> Self {
-        Self { n_trees, seed: 0 }
+    /// Returns the documented defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
-/// Fitted isolation forest.
+/// Fitted Isolation Forest.
 #[derive(Clone, Debug)]
 pub struct FittedIsolationForest {
-    trees: Vec<IsoNode>,
-    /// Subsample size used to grow each tree (and in \(c(n)\)).
+    inner: mayoi_no_mori::FittedIsolationForest,
+    /// Actual subsample size used by every tree.
     pub max_samples: usize,
     /// Training feature count.
     pub n_features: usize,
-    /// \(c(\texttt{max_samples})\).
+    /// Isolation normalizer `c(max_samples)`.
     pub c_norm: f64,
 }
 
 impl FittedIsolationForest {
-    /// Mean path length of row `i`.
-    pub fn average_path_length(&self, x: &Matrix, i: usize) -> f64 {
-        if self.trees.is_empty() {
-            return 0.0;
+    /// Returns the mean adjusted path length for one row.
+    ///
+    /// # Errors
+    ///
+    /// Returns a quality failure for an incompatible matrix, non-finite input,
+    /// or an out-of-range row.
+    pub fn average_path_length(
+        &self,
+        x: &Matrix,
+        row: usize,
+        session: &Session,
+    ) -> Result<Qualified<f64>> {
+        let ctx = FitCtx::with_session(session.child("average_path_length"));
+        match self.inner.average_path_length(x, row) {
+            Ok(value) => ctx.finish(value),
+            Err(error) => fail_mayoi(ctx, "Isolation Forest path length", error),
         }
-        let mut s = 0.0;
-        for t in &self.trees {
-            s += iso_path(t, x, i);
-        }
-        s / self.trees.len() as f64
     }
 
-    /// Liu et al. anomaly score \(s(x,n)=2^{-E(h)/c(n)}\) (higher = more anomalous).
-    pub fn score_samples(&self, x: &Matrix) -> Vector {
-        let c = if self.c_norm > 0.0 { self.c_norm } else { 1.0 };
-        Vector::from_iter((0..x.nrows()).map(|i| {
-            let eh = self.average_path_length(x, i);
-            2.0_f64.powf(-eh / c)
-        }))
+    /// Returns one isolation score per row.
+    ///
+    /// # Errors
+    ///
+    /// Returns a quality failure for an incompatible matrix or non-finite input.
+    pub fn score_samples(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("score_samples"));
+        match self.inner.score_samples(x) {
+            Ok(values) => ctx.finish(Vector::from_iter(values)),
+            Err(error) => fail_mayoi(ctx, "Isolation Forest scoring", error),
+        }
     }
 }
 
 impl Predict for FittedIsolationForest {
     type Output = Vector;
+
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
-        let mut ctx = FitCtx::with_session(session.child("predict"));
-        predict_shape_guard(&mut ctx, x, self.n_features);
-        ctx.finish(self.score_samples(x))
+        self.score_samples(x, &session.child("predict"))
     }
 }
 
 impl FitUnsupervised for IsolationForest {
     type Fitted = FittedIsolationForest;
+
     fn fit_unsupervised(
         &mut self,
         x: &Matrix,
         session: &Session,
-    ) -> Result<Qualified<FittedIsolationForest>> {
+    ) -> Result<Qualified<Self::Fitted>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        let n = x.nrows();
-        if n == 0 {
-            return ctx.finish(FittedIsolationForest {
-                trees: Vec::new(),
-                max_samples: 0,
-                n_features: x.ncols(),
-                c_norm: 0.0,
-            });
-        }
-        let all_constant = (0..x.ncols()).all(|j| {
-            let col = x.column(j);
-            signlred::slice_stats(col.as_slice()).is_constant(ctx.policy.near_zero_variance)
+        let model = mayoi_no_mori::IsolationForest::new(IsolationForestOptions {
+            trees: self.n_trees,
+            max_samples: 256,
+            seed: self.seed,
         });
-        if all_constant {
-            ctx.push(
-                Issue::builder(IssueCode::MeaninglessFit)
-                    .message(
-                        "Isolation Forest on a constant design: every path length is identical",
-                    )
-                    .meaninglessness(Meaninglessness::vacuous(
-                        "isolation path lengths",
-                        "no feature has variation, so random splits cannot isolate",
-                        "do not rank anomalies on a point mass",
-                    ))
-                    .build(),
-            );
-        }
-        let max_samples = n.min(256);
-        let max_depth = (max_samples as f64).log2().ceil().max(1.0) as usize;
-        let mut rng = Rng::new(self.seed);
-        let mut trees = Vec::new();
-        let n_trees = self.n_trees.max(1);
-        for t in 0..n_trees {
-            let mut trng = Rng::new(rng.next_u64());
-            let idx = if n > max_samples {
-                trng.sample_indices(n, max_samples)
-            } else {
-                (0..n).collect()
-            };
-            trees.push(grow_iso(x, &idx, 0, max_depth, &mut trng));
-            ctx.session.step(t as u64, 0.0, None);
-        }
-        ctx.session
-            .converged(format!("{n_trees} isolation trees"), n_trees as u64);
-        ctx.finish(FittedIsolationForest {
-            trees,
-            max_samples,
-            n_features: x.ncols(),
-            c_norm: isolation_c_factor(max_samples as f64),
-        })
-    }
-}
-
-fn iso_leaf_code(node: &IsoNode, x: &Matrix, i: usize) -> u64 {
-    match node {
-        IsoNode::External { size, depth } => (*depth as u64)
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            .wrapping_add(*size as u64),
-        IsoNode::Internal {
-            feature,
-            threshold,
-            left,
-            right,
-        } => {
-            let bit = if x.get(i, *feature) <= *threshold {
-                1
-            } else {
-                2
-            };
-            iso_leaf_code(if bit == 1 { left } else { right }, x, i)
-                .wrapping_mul(3)
-                .wrapping_add(*feature as u64 + bit)
-        }
-    }
-}
-
-/// Completely-random tree leaf embedding (sklearn `RandomTreesEmbedding`).
-///
-/// Tree count and hash width are not identification `p`.
-#[derive(Clone, Debug)]
-pub struct RandomTreesEmbedding {
-    /// Number of random trees.
-    pub n_estimators: usize,
-    /// Hashed leaf-code width.
-    pub n_components: usize,
-    /// PRNG seed.
-    pub seed: u64,
-}
-
-impl Default for RandomTreesEmbedding {
-    fn default() -> Self {
-        Self {
-            n_estimators: 8,
-            n_components: 8,
-            seed: 0,
-        }
-    }
-}
-
-impl RandomTreesEmbedding {
-    /// Embedding with `n_estimators` trees and `n_components` hash bins.
-    pub fn new(n_estimators: usize, n_components: usize) -> Self {
-        Self {
-            n_estimators,
-            n_components,
-            ..Self::default()
-        }
-    }
-}
-
-/// Fitted random-tree leaf embedding.
-#[derive(Clone, Debug)]
-pub struct FittedRandomTreesEmbedding {
-    trees: Vec<IsoNode>,
-    n_components: usize,
-    n_features: usize,
-}
-
-impl FitUnsupervised for RandomTreesEmbedding {
-    type Fitted = FittedRandomTreesEmbedding;
-    fn fit_unsupervised(
-        &mut self,
-        x: &Matrix,
-        session: &Session,
-    ) -> Result<Qualified<FittedRandomTreesEmbedding>> {
-        let mut ctx = FitCtx::with_session(session.clone());
-        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        let n = x.nrows();
-        let n_est = self.n_estimators.max(1);
-        let n_comp = self.n_components.max(1);
-        if n == 0 || x.ncols() == 0 {
-            ctx.push(
-                Issue::builder(IssueCode::EmptyMatrix)
-                    .severity(signlred::Severity::Warning)
-                    .message("RandomTreesEmbedding received an empty design")
-                    .build(),
-            );
-            return ctx.finish(FittedRandomTreesEmbedding {
-                trees: Vec::new(),
-                n_components: n_comp,
-                n_features: x.ncols(),
-            });
-        }
-        let max_depth = (n as f64).log2().ceil().max(1.0) as usize;
-        let mut rng = Rng::new(self.seed ^ 0xA11CE);
-        let mut trees = Vec::with_capacity(n_est);
-        for t in 0..n_est {
-            let mut trng = Rng::new(rng.next_u64());
-            let idx: Vec<usize> = (0..n).collect();
-            trees.push(grow_iso(x, &idx, 0, max_depth.max(2), &mut trng));
-            ctx.session.step(t as u64, 0.0, None);
-        }
-        ctx.finish(FittedRandomTreesEmbedding {
-            trees,
-            n_components: n_comp,
-            n_features: x.ncols(),
-        })
-    }
-}
-
-impl Transform for FittedRandomTreesEmbedding {
-    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
-        let mut ctx = FitCtx::with_session(session.child("transform"));
-        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        if x.ncols() != self.n_features {
-            ctx.push(
-                Issue::builder(IssueCode::DimensionMismatch)
-                    .severity(signlred::Severity::Warning)
-                    .message("RandomTreesEmbedding column count changed")
-                    .build(),
-            );
-        }
-        let m = self.n_components.max(1);
-        let mut out = Matrix::zeros(x.nrows(), m);
-        for i in 0..x.nrows() {
-            for (t, tree) in self.trees.iter().enumerate() {
-                let code = iso_leaf_code(tree, x, i).wrapping_add(t as u64);
-                let bin = (code as usize) % m;
-                out.set(i, bin, out.get(i, bin) + 1.0);
+        match model.fit(x) {
+            Ok(inner) => {
+                let max_samples = inner.max_samples();
+                let c_norm = inner.normalizer();
+                ctx.finish(FittedIsolationForest {
+                    inner,
+                    max_samples,
+                    n_features: x.ncols(),
+                    c_norm,
+                })
             }
+            Err(error) => fail_mayoi(ctx, "Isolation Forest fit", error),
         }
-        ctx.finish(out)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ojizou_san::Session;
 
-    fn accuracy(pred: &Vector, y: &Vector) -> f64 {
-        if y.is_empty() {
-            return 0.0;
-        }
-        let mut ok = 0usize;
-        for i in 0..y.len() {
-            if (pred[i].round() - y[i].round()).abs() < 0.5 {
-                ok += 1;
-            }
-        }
-        ok as f64 / y.len() as f64
-    }
-
-    fn xor_like(n: usize, seed: u64) -> (Matrix, Vector) {
-        let mut rng = Rng::new(seed);
-        let mut data = vec![0.0; n * 2];
-        let mut y = vec![0.0; n];
-        for i in 0..n {
-            let a = if rng.uniform() < 0.5 { 0.0 } else { 1.0 };
-            let b = if rng.uniform() < 0.5 { 0.0 } else { 1.0 };
-            data[i * 2] = a + 0.02 * rng.standard_normal();
-            data[i * 2 + 1] = b + 0.02 * rng.standard_normal();
-            y[i] = if (a > 0.5) ^ (b > 0.5) { 1.0 } else { 0.0 };
-        }
-        (Matrix::from_row_major(n, 2, &data), Vector::from_slice(&y))
-    }
-
-    fn two_blobs(n_per: usize, seed: u64) -> (Matrix, Vector) {
-        let mut rng = Rng::new(seed);
-        let n = n_per * 2;
-        let mut data = vec![0.0; n * 2];
-        let mut y = vec![0.0; n];
-        for i in 0..n {
-            let c = if i < n_per { 0.0 } else { 4.0 };
-            data[i * 2] = c + 0.2 * rng.standard_normal();
-            data[i * 2 + 1] = c + 0.2 * rng.standard_normal();
-            y[i] = if i < n_per { 0.0 } else { 1.0 };
-        }
-        (Matrix::from_row_major(n, 2, &data), Vector::from_slice(&y))
+    fn session(name: &str) -> Session {
+        Session::new(name, "fit")
     }
 
     #[test]
-    fn cart_xor_accuracy() {
-        let (x, y) = xor_like(48, 3);
-        let session = Session::new("decision_tree_classifier", "fit");
-        let q = DecisionTreeClassifier {
-            max_depth: 4,
-            ..DecisionTreeClassifier::default()
-        }
-        .fit(&x, &y, &session)
-        .expect("tree");
-        let pred = q
-            .value
-            .predict(&x, &Session::new("decision_tree_classifier", "predict"))
-            .expect("pred")
+    fn cart_adapter_matches_a_separable_case() {
+        let x = Matrix::from_row_major(4, 1, &[0.0, 1.0, 2.0, 3.0]);
+        let y = Vector::from_iter([-4.0, -4.0, 9.0, 9.0]);
+        let fitted = DecisionTreeClassifier::new()
+            .fit(&x, &y, &session("cart_adapter"))
+            .expect("fit")
             .value;
-        assert!(accuracy(&pred, &y) > 0.8, "acc={}", accuracy(&pred, &y));
+        assert_eq!(fitted.classes, vec![-4, 9]);
+        assert_eq!(
+            fitted
+                .predict(&x, &session("cart_predict"))
+                .expect("predict")
+                .value,
+            y
+        );
     }
 
     #[test]
-    fn forest_two_blob_accuracy() {
-        let (x, y) = two_blobs(20, 9);
-        let session = Session::new("random_forest", "fit");
-        let q = RandomForestClassifier {
+    fn depth_zero_cart_aborts_when_nonconstant_target_collapses() {
+        let x = Matrix::from_row_major(4, 1, &[0.0, 1.0, 2.0, 3.0]);
+        let y = Vector::from_iter([-2.0, -1.0, 1.0, 2.0]);
+        let failure = DecisionTreeRegressor {
+            max_depth: 0,
+            ..DecisionTreeRegressor::default()
+        }
+        .fit(&x, &y, &session("cart_depth_zero"))
+        .expect_err("a depth-zero rule must not hide a vacuous fit");
+        assert_eq!(failure.primary.code, IssueCode::PredictionsAreConstant);
+        assert!(failure.report.contains(IssueCode::PredictionsAreConstant));
+    }
+
+    #[test]
+    fn classifier_rejects_label_at_positive_i64_boundary() {
+        let x = Matrix::from_row_major(4, 1, &[0.0, 1.0, 2.0, 3.0]);
+        let y = Vector::from_iter([0.0, 1.0, 9_223_372_036_854_775_808.0, 1.0]);
+        let failure = DecisionTreeClassifier::new()
+            .fit(&x, &y, &session("cart_i64_boundary"))
+            .expect_err("2^63 is not representable as i64");
+        assert_eq!(failure.primary.code, IssueCode::InvalidParameter);
+        assert!(failure.report.contains(IssueCode::InvalidParameter));
+    }
+
+    #[test]
+    fn forest_adapter_replays_a_seed() {
+        let x = Matrix::from_row_major(6, 1, &[0.0, 0.5, 1.0, 2.0, 2.5, 3.0]);
+        let y = Vector::from_iter([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+        let mut first = RandomForestClassifier {
             n_estimators: 12,
-            seed: 2,
+            seed: 42,
             ..RandomForestClassifier::default()
-        }
-        .fit(&x, &y, &session)
-        .expect("rf");
-        let pred = q
-            .value
-            .predict(&x, &Session::new("random_forest", "predict"))
-            .expect("pred")
-            .value;
-        assert!(accuracy(&pred, &y) > 0.8, "acc={}", accuracy(&pred, &y));
+        };
+        let mut second = first.clone();
+        let a = first.fit(&x, &y, &session("rf_a")).expect("first").value;
+        let b = second.fit(&x, &y, &session("rf_b")).expect("second").value;
+        assert_eq!(
+            a.predict(&x, &session("rf_ap")).expect("predict a").value,
+            b.predict(&x, &session("rf_bp")).expect("predict b").value
+        );
     }
 
     #[test]
-    fn extra_trees_and_boosters_two_blob() {
-        let (x, y) = two_blobs(18, 4);
-        let et = ExtraTreesClassifier {
-            n_estimators: 16,
-            seed: 5,
-            ..ExtraTreesClassifier::default()
-        }
-        .fit(&x, &y, &Session::new("extra_trees", "fit"))
-        .expect("et");
-        let p = et
-            .value
-            .predict(&x, &Session::new("extra_trees", "predict"))
-            .unwrap()
-            .value;
-        assert!(accuracy(&p, &y) > 0.8);
-
-        let etc = ExtraTreeClassifier {
-            seed: 5,
-            ..ExtraTreeClassifier::default()
-        }
-        .fit(&x, &y, &Session::new("extra_tree", "fit"))
-        .expect("etc");
-        let p1 = etc
-            .value
-            .predict(&x, &Session::new("extra_tree", "predict"))
-            .unwrap()
-            .value;
-        assert_eq!(p1.len(), y.len());
-
-        let gbc = GradientBoostingClassifier {
-            n_estimators: 20,
-            learning_rate: 0.2,
-            max_depth: 2,
-            seed: 1,
-            ..GradientBoostingClassifier::default()
-        }
-        .fit(&x, &y, &Session::new("gbc", "fit"))
-        .expect("gbc");
-        let p = gbc
-            .value
-            .predict(&x, &Session::new("gbc", "predict"))
-            .unwrap()
-            .value;
-        assert!(accuracy(&p, &y) > 0.8);
-
-        let ada = AdaBoostClassifier {
-            n_estimators: 20,
-            algorithm: AdaBoostAlgorithm::Samme,
-            max_depth: 2,
-            seed: 1,
+    fn legacy_samme_r_selector_is_rejected_explicitly() {
+        let x = Matrix::from_row_major(4, 1, &[0.0, 1.0, 2.0, 3.0]);
+        let y = Vector::from_iter([0.0, 0.0, 1.0, 1.0]);
+        let failure = AdaBoostClassifier {
+            algorithm: AdaBoostAlgorithm::SammeR,
             ..AdaBoostClassifier::default()
         }
-        .fit(&x, &y, &Session::new("adaboost", "fit"))
-        .expect("ada");
-        let p = ada
-            .value
-            .predict(&x, &Session::new("adaboost", "predict"))
-            .unwrap()
-            .value;
-        assert!(accuracy(&p, &y) > 0.8);
+        .fit(&x, &y, &session("samme_r"))
+        .expect_err("unsupported legacy selector");
+        assert_eq!(failure.primary.code, IssueCode::InvalidParameter);
     }
 
     #[test]
-    fn constant_y_errors() {
-        let x = Matrix::from_fn(8, 2, |i, j| (i + j) as f64);
-        let y = Vector::filled(8, 3.0);
-        let err = DecisionTreeClassifier::new()
-            .fit(&x, &y, &Session::new("tree", "fit"))
-            .unwrap_err();
-        assert!(
-            err.primary().code == IssueCode::ConstantTarget
-                || err.primary().code == IssueCode::SingleClass
+    fn isolation_scoring_rejects_shape_and_non_finite_inputs() {
+        let training = Matrix::from_row_major(
+            8,
+            2,
+            &[
+                0.0, 0.0, 0.5, 1.0, 1.0, 0.5, 1.5, 1.5, 2.0, 1.0, 2.5, 2.0, 3.0, 1.5, 3.5, 3.0,
+            ],
         );
-        assert!(
-            err.report.contains(IssueCode::ConstantTarget)
-                || err.report.contains(IssueCode::SingleClass)
-        );
-        let err = DecisionTreeRegressor::new()
-            .fit(&x, &y, &Session::new("tree_reg", "fit"))
-            .unwrap_err();
-        assert_eq!(err.primary().code, IssueCode::ConstantTarget);
-    }
+        let fitted = IsolationForest {
+            n_trees: 8,
+            seed: 17,
+        }
+        .fit_unsupervised(&training, &session("isolation_fit"))
+        .expect("fit")
+        .value;
 
-    #[test]
-    fn isolation_scores_far_point() {
-        let (x, _) = two_blobs(16, 1);
-        let session = Session::new("iforest", "fit");
-        let q = IsolationForest {
-            n_trees: 20,
-            seed: 7,
-        }
-        .fit_unsupervised(&x, &session)
-        .expect("if");
-        let mut far = Matrix::zeros(1, 2);
-        far.set(0, 0, 40.0);
-        far.set(0, 1, -40.0);
-        let s_in = q
-            .value
-            .predict(&x, &Session::new("iforest", "predict"))
-            .unwrap()
-            .value;
-        let s_out = q
-            .value
-            .predict(&far, &Session::new("iforest", "predict"))
-            .unwrap()
-            .value;
-        let mean_in = s_in.mean();
-        assert!(
-            s_out[0] > mean_in,
-            "outlier score {} vs inlier mean {}",
-            s_out[0],
-            mean_in
-        );
-        let emb = RandomTreesEmbedding::new(4, 6)
-            .fit_unsupervised(&x, &Session::new("rte", "fit"))
-            .expect("rte");
-        let z = emb
-            .value
-            .transform(&x, &Session::new("rte", "t"))
-            .unwrap()
-            .value;
-        assert_eq!(z.nrows(), x.nrows());
-        assert_eq!(z.ncols(), 6);
-        assert!(z.get(0, 0).is_finite());
-    }
+        let wrong_shape = Matrix::from_row_major(2, 1, &[0.0, 1.0]);
+        let shape_failure = fitted
+            .score_samples(&wrong_shape, &session("isolation_shape"))
+            .expect_err("feature-count mismatch must be a quality failure");
+        assert_eq!(shape_failure.primary.code, IssueCode::DimensionMismatch);
 
-    #[test]
-    fn gbr_fits_line() {
-        let x = Matrix::from_fn(12, 1, |i, _| i as f64);
-        let y = Vector::from_iter((0..12).map(|i| 0.5 * i as f64));
-        let q = GradientBoostingRegressor {
-            n_estimators: 25,
-            learning_rate: 0.2,
-            max_depth: 2,
-            ..GradientBoostingRegressor::default()
-        }
-        .fit(&x, &y, &Session::new("gbr", "fit"))
-        .expect("gbr");
-        let etr = ExtraTreeRegressor {
-            seed: 3,
-            ..ExtraTreeRegressor::default()
-        }
-        .fit(&x, &y, &Session::new("etr", "fit"))
-        .expect("etr");
-        let etp = etr
-            .value
-            .predict(&x, &Session::new("etr", "predict"))
-            .unwrap()
-            .value;
-        assert_eq!(etp.len(), y.len());
-        let pred = q
-            .value
-            .predict(&x, &Session::new("gbr", "predict"))
-            .unwrap()
-            .value;
-        let mut sse = 0.0;
-        for i in 0..y.len() {
-            let e = pred[i] - y[i];
-            sse += e * e;
-        }
-        assert!(
-            sse / (y.len() as f64) < 0.5,
-            "mse={}",
-            sse / (y.len() as f64)
-        );
-    }
-
-    #[test]
-    fn adaboost_r2_fits_a_line() {
-        let x = Matrix::from_fn(16, 1, |i, _| i as f64);
-        let y = Vector::from_iter((0..16).map(|i| 0.4 * i as f64 + 0.1 * ((i % 3) as f64)));
-        let q = AdaBoostRegressor {
-            n_estimators: 25,
-            max_depth: 4,
-            ..AdaBoostRegressor::default()
-        }
-        .fit(&x, &y, &Session::new("abr", "fit"))
-        .expect("abr");
-        let pred = q
-            .value
-            .predict(&x, &Session::new("abr", "p"))
-            .unwrap()
-            .value;
-        let mut sse = 0.0;
-        for i in 0..y.len() {
-            let e = pred[i] - y[i];
-            sse += e * e;
-        }
-        assert!(
-            sse / (y.len() as f64) < 1.0,
-            "mse={}",
-            sse / (y.len() as f64)
-        );
+        let non_finite = Matrix::from_row_major(1, 2, &[f64::NAN, 0.0]);
+        let finite_failure = fitted
+            .score_samples(&non_finite, &session("isolation_non_finite"))
+            .expect_err("non-finite scoring input must not become a NaN score");
+        assert_eq!(finite_failure.primary.code, IssueCode::NonFiniteInput);
     }
 }

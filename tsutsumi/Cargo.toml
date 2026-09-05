@@ -1,0 +1,22 @@
+[package]
+name = "tsutsumi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Auditable shared numerical kernels, optimization, and faer linear algebra in Pure Rust."
+readme = "README.md"
+
+[features]
+default = ["linalg"]
+linalg = ["dep:faer", "dep:signlred", "dep:ojizou-san"]
+
+[dependencies]
+faer = { workspace = true, optional = true }
+signlred = { workspace = true, optional = true }
+ojizou-san = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = "1.0"

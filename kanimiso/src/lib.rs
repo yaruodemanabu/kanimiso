@@ -1,16 +1,17 @@
-//! `kanimiso` — Pure Rust machine learning and statistics.
+//! `kanimiso` — a verification-first Pure Rust core for time-series
+//! econometrics, online estimation, state-space models, and statistical
+//! learning.
 //!
 //! v0.2 is being reconstituted from a small verified core (see the repo
 //! `AGENTS.md`). Claims of coverage track [`coverage::verified`], not the raw
-//! [`coverage::inventory`]. Until `0.2.0-alpha.1` this crate does **not**
-//! claim equivalence to scikit-learn, statsmodels, sktime, tslearn, hmmlearn,
-//! or river.
+//! [`coverage::inventory`]. This crate does **not** claim drop-in equivalence
+//! to scikit-learn, statsmodels, sktime, tslearn, hmmlearn, or river.
 //!
 //! Constraints honoured by this crate:
 //! - N-dimensional arrays use [`ndarray`]; linear algebra goes through [`faer`]
 //! - no `unsafe`, no non-Rust native libraries
-//! - every fit/predict/partial_fit talks to [`signlred`] (quality errors) and
-//!   [`ojizou_san`] (quality logging)
+//! - estimator APIs report quality through [`signlred`] and log fit sessions
+//!   through [`ojizou_san`]
 //! - incremental algorithms emit [`ojizou_san::IncrementalExplain`]
 //!
 //! A silent successful fit is a bug.
@@ -73,10 +74,18 @@ pub mod vecm;
 pub use context::FitCtx;
 pub use coverage::{inventory, verified, Algorithm, CoverageStatus};
 pub use data::{Matrix, Vector};
+/// Forest and boosting crate built on [`oldwood`].
+pub use mayoi_no_mori;
 pub use ndarray;
+/// Annotated regression, mixed and additive analyses, and linear SHAP.
+pub use number_ruler;
 pub use ojizou_san as log;
+/// Verification-first CART crate used by the tree stack.
+pub use oldwood;
 pub use signlred;
 pub use traits::{Fit, FitSeries, FitUnsupervised, PartialFit, Predict, Transform};
+/// Shared independently tested numerical kernels and matrix contracts.
+pub use tsutsumi;
 
 /// Crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
