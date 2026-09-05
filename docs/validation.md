@@ -8,6 +8,8 @@
 新しい注釈付き回帰、混合・加法モデル、線形 SHAP の外部オラクルと実測誤差は
 [`number-ruler の検証仕様`](../number-ruler/docs/validation.md) にまとめています。
 正規分布の上側 p 値は同 fixture の直接裾 oracle により Verified へ昇格しました。
+サブクレートを含む仕様書とテストの対応表は
+[カバー状況の監査メモ](spec_and_test_coverage.md) にある。実装状況の正本ではない。
 
 ## 状態の意味
 
