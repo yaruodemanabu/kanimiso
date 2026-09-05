@@ -430,7 +430,7 @@ fn infer_linear(
         dw_num += d * d;
     }
     let dw = if sse > 0.0 { dw_num / sse } else { f64::NAN };
-    if dw.is_finite() && (dw < 1.0 || dw > 3.0) && n >= 8 {
+    if dw.is_finite() && !(1.0..=3.0).contains(&dw) && n >= 8 {
         ctx.push(
             Issue::builder(IssueCode::AutocorrelatedResiduals)
                 .message(format!(
