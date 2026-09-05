@@ -5,7 +5,8 @@ All notable changes to `oldwood` are documented here.
 ## 0.1.0
 
 - Replaced the incomplete Python criteria archive with a standalone Pure Rust
-  crate and no external dependencies.
+  crate without external runtime dependencies; the shared `MatrixView`
+  contract comes from first-party `tsutsumi` with default features disabled.
 - Added deterministic weighted CART classification and regression.
 - Added runtime Gini, entropy, and squared-error criteria.
 - Added `MatrixView`, `DenseMatrix`, exhaustive fitting, probability
