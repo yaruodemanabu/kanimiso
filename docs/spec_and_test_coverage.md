@@ -17,6 +17,7 @@ CI コメントの記録値である。
 - 検証状態の台帳: `kanimiso::coverage::inventory()` / `verified()`
 - 何を作らないか: [`AGENTS.md`](../AGENTS.md)
 - 削除済み v0.1 面: [`docs/dropped_v0_1.md`](dropped_v0_1.md)
+- 残モジュールのサブクレート化と `ogi` の切り出し計画: [`docs/ogi_subcrate_plan.md`](ogi_subcrate_plan.md)
 
 ---
 
