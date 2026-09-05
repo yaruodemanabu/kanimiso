@@ -149,6 +149,8 @@ fit / predict / partial_fit
 | `ojizou-san` | `Session`、品質 ledger、妥協 journal、オンライン学習の説明 |
 | [`oldwood`](oldwood/README.md) | weighted CART の単一 split / arena / traversal 核 |
 | [`mayoi-no-mori`](mayoi-no-mori/README.md) | random forest、ExtraTrees、GBDT、AdaBoost、Isolation Forest、範囲を限定した LightGBM / CatBoost 系 |
+| [`denshi`](denshi/README.md) | full-information の Hedge と projected online gradient descent |
+| [`riko`](riko/README.md) | stochastic UCB と adversarial exponential-weights bandit |
 
 最初の回帰分析には `number-ruler`、計算核の直接利用・比較には `tsutsumi`、
 単体 crate として CART だけが必要なら `oldwood`、ensemble が必要なら
@@ -156,7 +158,8 @@ fit / predict / partial_fit
 `Session` / `Qualified<T>` の品質契約へ接続するアダプターですが、旧 API との source
 compatibility は保証しません。公開時の first-party crate の順序は
 `signlred` → `ojizou-san` → `tsutsumi` → `number-ruler` / `oldwood`、
-続いて `amatsuki` と `oldwood` に依存する `mayoi-no-mori`、最後に `kanimiso` です。
+続いて独立した `denshi` / `riko`、`amatsuki` と `oldwood` に依存する
+`mayoi-no-mori`、最後に `kanimiso` です。
 旧 `kanimiso::{data,linalg,optimize,special,...}` は `tsutsumi`、OLS は `number-ruler` を
 再公開し、数値核を二重に持ちません。
 

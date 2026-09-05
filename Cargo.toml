@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["signlred", "ojizou-san", "tsutsumi", "number-ruler", "oldwood", "mayoi-no-mori", "kanimiso"]
-default-members = ["signlred", "ojizou-san", "tsutsumi", "number-ruler", "oldwood", "mayoi-no-mori", "kanimiso"]
+members = ["signlred", "ojizou-san", "tsutsumi", "number-ruler", "oldwood", "mayoi-no-mori", "denshi", "riko", "kanimiso"]
+default-members = ["signlred", "ojizou-san", "tsutsumi", "number-ruler", "oldwood", "mayoi-no-mori", "denshi", "riko", "kanimiso"]
 exclude = ["Isuzu/amatsuki"]
 
 [workspace.package]
@@ -21,4 +21,6 @@ signlred = { path = "signlred", version = "0.1.0" }
 ojizou-san = { path = "ojizou-san", version = "0.1.0" }
 oldwood = { path = "oldwood", version = "0.1.0" }
 mayoi-no-mori = { path = "mayoi-no-mori", version = "0.1.0" }
+denshi = { path = "denshi", version = "0.1.0" }
+riko = { path = "riko", version = "0.1.0" }
 amatsuki = { path = "Isuzu/amatsuki", version = "0.1.0", default-features = false }
